@@ -1,6 +1,10 @@
 # 06 — README: quickstart, schema reference, privacy
 
-Status: todo
+Status: done
+
+Written after ticket 07 landed, so `url:` is documented for real rather than
+as "planned". The datasette-parquet `just view` trick did not survive the 1.0
+alphas (ticket 05) — the cookbook links the ticket instead of promising it.
 
 ## Must contain
 

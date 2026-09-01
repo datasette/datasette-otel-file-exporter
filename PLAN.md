@@ -126,13 +126,13 @@ Work them in order; each is self-contained with acceptance criteria.
 
 | # | Ticket | Status |
 |---|--------|--------|
-| 01 | [Scaffold the package](tickets/01-scaffold.md) | todo |
-| 02 | [Provider wiring + coexistence with otlp/agent](tickets/02-provider-wiring.md) | todo |
-| 03 | [Schema + ParquetSpanExporter + rolling writer](tickets/03-parquet-exporter.md) | todo |
-| 04 | [Tests](tickets/04-tests.md) | todo |
-| 05 | [Justfile: demo + canned DuckDB queries](tickets/05-justfile-demo.md) | todo |
-| 06 | [README: quickstart, schema reference, privacy](tickets/06-readme.md) | todo |
-| 07 | [S3/object storage via obstore `url:`](tickets/07-s3-obstore.md) | todo (design sketched; build after 01–06) |
+| 01 | [Scaffold the package](tickets/01-scaffold.md) | done |
+| 02 | [Provider wiring + coexistence with otlp/agent](tickets/02-provider-wiring.md) | done (spike findings recorded in ticket) |
+| 03 | [Schema + ParquetSpanExporter + rolling writer](tickets/03-parquet-exporter.md) | done |
+| 04 | [Tests](tickets/04-tests.md) | done |
+| 05 | [Justfile: demo + canned DuckDB queries](tickets/05-justfile-demo.md) | done (`just view` dropped — see ticket) |
+| 07 | [S3/object storage via obstore `url:`](tickets/07-s3-obstore.md) | done (built before 06 so the README documents `url:` for real; live-tested against versitygw) |
+| 06 | [README: quickstart, schema reference, privacy](tickets/06-readme.md) | done |
 | 08 | [Stretch: retention pruning](tickets/08-retention.md) | todo (stretch — skip for 0.1) |
 
 ## Reference material
