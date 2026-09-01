@@ -1,6 +1,6 @@
 # 02 — Provider wiring + coexistence with otlp/agent
 
-Status: todo
+Status: done
 
 Get a `BatchSpanProcessor` (feeding ticket 03's exporter) attached early enough to
 catch the `datasette.startup` trace, without fighting whoever else may own the
@@ -50,6 +50,44 @@ exists, this plugin should **join it**:
 3. **Shutdown.** When we own the provider, ensure process exit flushes (SDK's atexit
    handles `shutdown()` → our exporter's final write). When attached to a foreign
    provider, confirm its shutdown reaches our processor too.
+
+### Measured answers (2026-09-01, opentelemetry-sdk 1.44)
+
+1. **Dormant-otlp hazard: confirmed** (`test_dormant_otlp_starves_attached_processor`).
+   Startup trace (sampled before the switch) still lands; everything after otlp's
+   `ALWAYS_OFF` swap is dropped. v1 answer: at our `_configure`, sniff the shared
+   provider's `sampler.get_description()` and print one loud stderr line when the
+   effective decision is AlwaysOff (matching `(AlwaysOffSampler)` /
+   `root:AlwaysOffSampler`, NOT the default ParentBased description whose
+   `remoteParentNotSampled` arms also say AlwaysOffSampler — that was a real
+   false-positive bug during the spike). The warning fires when otlp's `startup()`
+   hook runs before ours — the order observed in this environment — and is
+   best-effort otherwise; README documents the caveat either way.
+2. **Import order: both orders leave THIS plugin working.** otlp-first: we attach to
+   its provider, both pipelines export (`test_otlp_first_both_export`).
+   Parquet-first: we own the provider and export; **otlp sees a real SDK provider at
+   import, goes `foreign`, and exports nothing even when configured**
+   (`test_parquet_first_otlp_goes_foreign`) — its known behavior, not ours to fix
+   from here; the real fix is a shared-wiring package, out of scope. Honest README
+   note: if you run both, and OTLP export goes quiet, import order is why.
+3. **Shutdown: confirmed.** Own provider → SDK atexit → `shutdown()` → final write
+   (the `--get /` smoke and `test_sigint_flushes_the_tail` both end with files on
+   disk). Attached → the owner's `shutdown()`/`force_flush()` iterates all
+   registered processors, ours included (SynchronousMultiSpanProcessor).
+
+Two more measured facts that shaped the code, recorded here because they are
+SDK-version-dependent:
+
+- `BatchSpanProcessor.force_flush()` drains its queue into `exporter.export()` but
+  **never calls the exporter's own `force_flush()`** — and its worker **never calls
+  `export()` while the queue is empty**. So the interval roll cannot live on BSP
+  cadence alone: after a burst followed by idle, the tail would sit buffered until
+  the next request or exit. The exporter therefore runs a small daemon flusher
+  thread (writes still never happen on the event loop or a request path).
+- `schedule_delay_millis` is constructor-only, but the worker re-reads
+  `_batch_processor._schedule_delay` every loop, so `_set_schedule_delay()` retunes
+  it at startup-hook time (best-effort across SDK layouts; harmless if internals
+  move — the flusher thread still guarantees the interval).
 
 ## Config read in `startup()`
 
