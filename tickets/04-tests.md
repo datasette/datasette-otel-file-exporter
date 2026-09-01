@@ -1,6 +1,13 @@
 # 04 — Tests
 
-Status: todo
+Status: done
+
+Note on case 5 (coexistence): those tests emit spans through
+`trace.get_tracer(...)` against the freshly installed provider rather than
+through Datasette requests — datasette's modules bind their module-level
+`tracer` to whichever provider was live at the process's first span, a
+test-process artifact (see the docstring in `tests/test_coexistence.py`).
+End-to-end span flow through real requests is covered by `test_export.py`.
 
 ## Bootstrap
 
