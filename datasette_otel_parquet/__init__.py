@@ -237,7 +237,35 @@ def _set_schedule_delay(processor, millis):
             pass
 
 
-def _build_store(path):
+def _build_store(path=None, url=None):
+    """LocalStore for path:, from_url for url: - the same write path either way.
+
+    Credentials for object-store URLs are never plugin config (datasette.yaml
+    gets committed to repos): obstore's native chain reads the standard env
+    vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL, ...),
+    instance metadata, etc., with automatic refresh.
+    """
+    if url is not None:
+        from datetime import timedelta
+
+        from obstore.store import from_url
+
+        # Spans are telemetry, not ledger entries: one retry (plus obstore's
+        # ~30s per-request timeout), then the exporter drops the batch with
+        # one log line. Never buffer unboundedly toward an unreachable
+        # bucket, never block process exit long on one. Client options
+        # (timeouts, allow_http) stay env-driven - passing client_options
+        # here would override the environment wholesale.
+        retry_config = {
+            "max_retries": 1,
+            "retry_timeout": timedelta(seconds=30),
+            "backoff": {
+                "init_backoff": timedelta(milliseconds=250),
+                "max_backoff": timedelta(seconds=2),
+                "base": 2,
+            },
+        }
+        return from_url(url, retry_config=retry_config)
     from obstore.store import LocalStore
 
     return LocalStore(prefix=path, mkdir=True)
@@ -257,7 +285,14 @@ def _configure(config):
         _set_service_name(_state["resource"], str(config["service_name"]))
 
     path = config.get("path")
-    if not path:
+    url = config.get("url")
+    if path and url:
+        # Loud, not last-one-wins: refusing to guess where telemetry goes.
+        raise ValueError(
+            f"{PLUGIN_NAME}: 'path' and 'url' are mutually exclusive - "
+            "configure exactly one"
+        )
+    if not path and not url:
         # Dormant: no destination anywhere. When we own the provider, stop
         # recording spans too, so an unconfigured install costs as close to
         # nothing as an installed SDK provider can. When attached, the
@@ -266,7 +301,7 @@ def _configure(config):
             _state["sampler"].set_delegate(ALWAYS_OFF)
         _state["exporter"].configure(None)
         if not _state["dormant_logged"]:
-            _log("no path configured - Parquet export is disabled")
+            _log("no path or url configured - Parquet export is disabled")
             _state["dormant_logged"] = True
         _state["mode"] = "dormant"
         return
@@ -278,10 +313,13 @@ def _configure(config):
         config.get("max_buffer_spans", DEFAULT_MAX_BUFFER_SPANS)
     )
     try:
-        store = _build_store(str(path))
+        store = _build_store(
+            path=str(path) if path else None,
+            url=str(url) if url else None,
+        )
     except Exception as exception:
         _log(
-            f"cannot open store for path {path!r} "
+            f"cannot open store for {url or path!r} "
             f"({type(exception).__name__}: {exception}) - "
             "Parquet export is disabled"
         )

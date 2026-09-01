@@ -1,6 +1,34 @@
 # 07 — S3/object storage via obstore `url:`
 
-Status: todo (design sketched below; build after 01–06 ship)
+Status: done
+
+Built as sketched; measured notes (2026-09-01, obstore 0.11.1, versitygw 1.7.0
+as the live S3 system instead of MinIO/Tigris):
+
+- `from_url("s3://bucket/prefix")` bakes the URL path in as the store prefix,
+  so the exporter needed zero changes — the whole point of the obstore seam.
+- Credentials work exactly as designed: `AWS_ACCESS_KEY_ID` /
+  `AWS_SECRET_ACCESS_KEY` / `AWS_ENDPOINT_URL` / `AWS_ALLOW_HTTP=true` env
+  vars, nothing in plugin config. **Do not pass `client_options` to
+  `from_url`** — it replaces the env-derived client config wholesale (found
+  out when it clobbered `AWS_ALLOW_HTTP` → BadScheme against the http
+  gateway).
+- Retry: obstore's built-in retry defaults are generous (10 retries); the
+  plugin passes `retry_config` with `max_retries: 1`, 30s retry budget,
+  250ms→2s backoff. Measured: a connection-refused endpoint fails a PUT in
+  0.25s; a hung endpoint is bounded by obstore's ~30s per-request timeout.
+  The exporter drops the failed batch with one stderr line per error class
+  (message-level dedupe logged every batch — messages embed per-file keys).
+- Shutdown: the SDK's `BatchProcessor.shutdown(timeout_millis=30000)` caps
+  the worker join, then calls our `shutdown()` unbounded — the retry_config
+  above is what actually bounds exit. Verified live: SIGINT on a server
+  writing to versitygw flushed the tail file to the bucket and exited
+  promptly.
+- Live acceptance ran via `just s3-gateway` + `just demo-s3` + `just
+  query-s3` — including an unplanned outage test (server up before the
+  gateway: batches dropped with a log line, clean recovery once the gateway
+  came up). versitygw gotcha: its posix backend root must be an absolute
+  path (it resolves after a chdir).
 
 Because ticket 03 writes bytes through an obstore store, this ticket is config
 plumbing and docs, not exporter changes. The whole point of choosing obstore early.

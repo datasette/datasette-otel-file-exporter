@@ -126,12 +126,12 @@ async def test_dormant_without_path(tmp_path, capsys):
     assert datasette_otel_parquet._state["mode"] == "dormant"
     assert glob.glob(f"{tmp_path}/**/*.parquet", recursive=True) == []
     err = capsys.readouterr().err
-    assert err.count("no path configured") == 1
+    assert err.count("no path or url configured") == 1
 
     # A second startup (another Datasette instance) does not log again
     another = make_datasette()
     await another.client.get("/")
-    assert "no path configured" not in capsys.readouterr().err
+    assert "no path or url configured" not in capsys.readouterr().err
 
 
 @pytest.mark.asyncio
@@ -162,6 +162,29 @@ async def test_unusable_path_does_not_break_serving(tmp_path, capsys):
 
     assert datasette_otel_parquet._state["mode"] == "dormant"
     assert "cannot open store" in capsys.readouterr().err
+
+
+@pytest.mark.asyncio
+async def test_url_via_obstore_from_url(tmp_path):
+    "Ticket 07: url: goes through obstore.store.from_url - no exporter changes."
+    tel = tmp_path / "tel"
+    tel.mkdir()
+    datasette = make_datasette(url=f"file://{tel}")
+    assert (await datasette.client.get("/")).status_code == 200
+    flush()
+
+    names = {row[0] for row in read(tel, "SELECT DISTINCT name FROM $T")}
+    assert "datasette.startup" in names
+    assert any(name.startswith("GET ") for name in names)
+
+
+@pytest.mark.asyncio
+async def test_path_and_url_mutually_exclusive(tmp_path):
+    datasette = make_datasette(
+        path=str(tmp_path / "a"), url=f"file://{tmp_path}/b"
+    )
+    with pytest.raises(ValueError, match="mutually exclusive"):
+        await datasette.client.get("/")
 
 
 def _free_port():

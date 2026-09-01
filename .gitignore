@@ -17,5 +17,6 @@ build
 
 # demo output - must never be committed
 telemetry/
+s3root/
 
 uv.lock

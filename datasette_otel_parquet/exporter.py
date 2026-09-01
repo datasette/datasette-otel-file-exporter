@@ -216,14 +216,19 @@ class ParquetSpanExporter(SpanExporter):
             obstore.put(
                 self._store, self._key(now), sink.getvalue().to_pybytes()
             )
+            # A recovery: the next outage deserves a fresh log line
+            self._logged_errors.clear()
             return SpanExportResult.SUCCESS
         except Exception as exception:  # never take down the request path
-            message = f"{type(exception).__name__}: {exception}"
-            if message not in self._logged_errors:
-                self._logged_errors.add(message)
+            # Dedupe on the error class: messages embed per-file keys and
+            # timings, so message-level dedupe would log every batch
+            # (measured against a downed S3 gateway).
+            if type(exception).__name__ not in self._logged_errors:
+                self._logged_errors.add(type(exception).__name__)
                 print(
                     f"datasette-otel-parquet: dropping batch of {len(rows)} "
-                    f"spans, write failed: {message}",
+                    f"spans, write failed: "
+                    f"{type(exception).__name__}: {exception}",
                     file=sys.stderr,
                 )
             return SpanExportResult.FAILURE
