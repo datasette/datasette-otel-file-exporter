@@ -70,6 +70,14 @@ exists, this plugin should **join it**:
    (`test_parquet_first_otlp_goes_foreign`) — its known behavior, not ours to fix
    from here; the real fix is a shared-wiring package, out of scope. Honest README
    note: if you run both, and OTLP export goes quiet, import order is why.
+> **Addendum 2026-09-01:** the two limitations above (items 1 and 2) were fixed on the otlp side
+> (its ticket 08, attach-don't-abdicate): parquet-first order now has otlp
+> attach to our provider and export, and dormant otlp only swaps in
+> `ALWAYS_OFF` when its processor is the sole one on the provider — so it no
+> longer starves ours. `test_coexistence.py` pins the fixed behavior; the
+> AlwaysOff-sniffing warning stays (it still guards against real agents whose
+> sampler is off).
+
 3. **Shutdown: confirmed.** Own provider → SDK atexit → `shutdown()` → final write
    (the `--get /` smoke and `test_sigint_flushes_the_tail` both end with files on
    disk). Attached → the owner's `shutdown()`/`force_flush()` iterates all

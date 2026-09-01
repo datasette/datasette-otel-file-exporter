@@ -1,6 +1,7 @@
 """
 Ticket 02's coexistence acceptance: both plugins installed, either import
-order; a foreign (agent-style) provider; the dormant-otlp hazard.
+order; a foreign (agent-style) provider; the dormant-otlp interaction
+(originally a starvation hazard, fixed by otlp ticket 08).
 
 These tests re-run each plugin's _install() after unwinding OpenTelemetry's
 set-once global, simulating the two possible entry-point import orders.
@@ -116,26 +117,28 @@ async def test_otlp_first_both_export(tmp_path, otlp_receiver):
 
 
 @pytest.mark.asyncio
-async def test_parquet_first_otlp_goes_foreign(tmp_path, otlp_receiver):
-    """Measured limitation: when this plugin owns the provider, the otlp
-    plugin sees a real SDK provider at import and goes foreign - it exports
-    nothing even when configured. Recorded in ticket 02; the real fix is a
-    shared-wiring package, out of scope."""
+async def test_parquet_first_both_export(tmp_path, otlp_receiver):
+    """When this plugin owns the provider, the otlp plugin attaches its
+    processor and both pipelines export (otlp ticket 08 fixed the old
+    go-foreign-and-export-nothing behavior ticket 02 had measured)."""
     reset_tracer_state()
     datasette_otel_parquet._install()
     assert datasette_otel_parquet._state["owns_provider"] is True
 
     otlp_plugin._install()
-    assert otlp_plugin._state["mode"] == "foreign"
+    assert otlp_plugin._state["mode"] == "pending"
+    assert otlp_plugin._state["owns_provider"] is False
+    assert otlp_plugin._state["provider"] is datasette_otel_parquet._state["provider"]
 
     tel = tmp_path / "tel"
     await run_startup(tel, endpoint=otlp_receiver.endpoint)
+    assert otlp_plugin._state["mode"] == "active"
 
-    emit_span("parquet-still-works")
+    emit_span("either-order-works")
     flush_everything()
 
-    assert "parquet-still-works" in parquet_names(tel)
-    assert otlp_receiver.posts == []
+    assert "either-order-works" in parquet_names(tel)
+    assert len(otlp_receiver.posts) >= 1
 
 
 @pytest.mark.asyncio
@@ -168,12 +171,13 @@ async def test_attaches_to_agent_installed_provider(tmp_path, capsys):
 
 
 @pytest.mark.asyncio
-async def test_dormant_otlp_starves_attached_processor(tmp_path):
-    """The hazard from ticket 02's spike: otlp installed with no endpoint
-    sets its sampler to ALWAYS_OFF at startup, so a processor attached to
-    its provider records nothing from then on, even though this plugin is
-    configured. v1 answer: a loud stderr line when the switched-off sampler
-    is visible at our configure time, plus honest README documentation."""
+async def test_dormant_otlp_no_longer_starves_attached_processor(tmp_path):
+    """Ticket 02's spike measured this as a hazard: dormant otlp swapped its
+    sampler to ALWAYS_OFF and starved a processor attached to its provider.
+    otlp ticket 08 fixed it - dormant otlp only kills sampling when its
+    processor is the sole one on the provider - so spans now land. The
+    AlwaysOff-sniffing warning in _configure stays: it still guards against
+    real agents whose sampler is off."""
     reset_tracer_state()
     otlp_plugin._install()
     datasette_otel_parquet._install()
@@ -184,7 +188,7 @@ async def test_dormant_otlp_starves_attached_processor(tmp_path):
     assert otlp_plugin._state["mode"] == "dormant"
     assert datasette_otel_parquet._state["mode"] == "active"
 
-    emit_span("nobody-sees-this")
+    emit_span("parquet-sees-this")
     flush_everything()
 
-    assert parquet_names(tel) == set()
+    assert "parquet-sees-this" in parquet_names(tel)

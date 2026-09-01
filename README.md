@@ -218,17 +218,15 @@ imported first — it **attaches its processor to that provider** instead:
 Parquet-alongside-OTLP is a supported combo, and the owner's sampler and
 `service.name` apply.
 
-Two honest caveats when running both plugins:
-
-- **Import order matters for the otlp plugin.** Plugin import order is not
-  guaranteed; if this plugin happens to import first and installs the
-  provider, datasette-otel-otlp sees a foreign provider and exports nothing.
-  Parquet files keep appearing either way. If your OTLP export goes quiet
-  after installing this plugin, that is why.
-- **datasette-otel-otlp installed but unconfigured turns sampling off** for
-  the provider it owns, which starves an attached Parquet processor too.
-  This plugin prints a loud stderr line when it can see that happened.
-  Either configure the otlp endpoint or uninstall the otlp plugin.
+Since datasette-otel-otlp's ticket 08 (attach-don't-abdicate), the
+combination is symmetric: whichever plugin imports first installs the
+provider, the other attaches to it, and both export in either order. A
+dormant (endpoint-less) otlp install no longer turns sampling off when
+another processor is attached to its provider. One residual caveat: if the
+provider this plugin attaches to samples nothing (an agent configured with
+an always-off sampler, or a pre-fix otlp build), no spans reach the Parquet
+files — this plugin prints a loud stderr line when it can see that at
+startup.
 
 ## Development
 
