@@ -265,7 +265,17 @@ def _build_store(path=None, url=None):
                 "base": 2,
             },
         }
-        return from_url(url, retry_config=retry_config)
+        store_kwargs = {}
+        # Fly.io's Tigris injects AWS_ENDPOINT_URL_S3, which obstore does not
+        # read; a per-key config kwarg fills the gap without touching
+        # client_options. AWS_ENDPOINT_URL, when set, wins by omission.
+        if (
+            url.startswith("s3://")
+            and "AWS_ENDPOINT_URL" not in os.environ
+            and os.environ.get("AWS_ENDPOINT_URL_S3")
+        ):
+            store_kwargs["endpoint"] = os.environ["AWS_ENDPOINT_URL_S3"]
+        return from_url(url, retry_config=retry_config, **store_kwargs)
     from obstore.store import LocalStore
 
     return LocalStore(prefix=path, mkdir=True)

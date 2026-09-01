@@ -100,6 +100,10 @@ export AWS_ENDPOINT_URL=https://fly.storage.tigris.dev   # or your R2/MinIO URL
 export AWS_ALLOW_HTTP=true                               # only for http:// endpoints
 ```
 
+On Fly.io with Tigris (`fly storage create`), no extra step is needed: Fly
+injects `AWS_ENDPOINT_URL_S3` (plus keys) into the app, and the plugin falls
+back to it for `s3://` URLs when `AWS_ENDPOINT_URL` is unset.
+
 Operational notes for buckets: each flush is one network PUT from a
 background thread (never the event loop). `flush_interval_seconds: 1`
 against S3 is a cost/latency decision you are making. A failed PUT is

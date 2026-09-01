@@ -30,6 +30,14 @@ as the live S3 system instead of MinIO/Tigris):
   came up). versitygw gotcha: its posix backend root must be an absolute
   path (it resolves after a chdir).
 
+Addendum 2026-09-01 (Fly.io research follow-up): Fly's Tigris integration
+injects `AWS_ENDPOINT_URL_S3`, which obstore 0.11.1 does not read (verified —
+`from_url` returns no endpoint with only that var set). `_build_store` now
+falls back to it for `s3://` URLs when `AWS_ENDPOINT_URL` is unset, passed as
+a per-key `endpoint=` kwarg — which, unlike `client_options` (the trap above),
+leaves the env-derived client config untouched (verified: `client_options`
+stays `None`). Standard var wins by omission. Makes Tigris-on-Fly zero-config.
+
 Because ticket 03 writes bytes through an obstore store, this ticket is config
 plumbing and docs, not exporter changes. The whole point of choosing obstore early.
 

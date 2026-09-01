@@ -181,3 +181,42 @@ def test_round_trip_fidelity(tmp_path):
     assert status == "ERROR"
     assert message == "boom 💥"
     assert event_detail == "läut 💥"
+
+
+class TestBuildStoreEndpointFallback:
+    "Fly.io Tigris injects AWS_ENDPOINT_URL_S3; obstore only reads AWS_ENDPOINT_URL."
+
+    ENV = ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3")
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for var in self.ENV:
+            monkeypatch.delenv(var, raising=False)
+        monkeypatch.setenv("AWS_ACCESS_KEY_ID", "test-key")
+        monkeypatch.setenv("AWS_SECRET_ACCESS_KEY", "test-secret")
+
+    def test_s3_fallback_applies(self, monkeypatch):
+        from datasette_otel_parquet import _build_store
+
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://tigris.test:9000")
+        store = _build_store(url="s3://bkt/pfx")
+        assert store.config.get("endpoint") == "http://tigris.test:9000"
+        # client_options must stay unset (env-driven; see ticket 07's trap)
+        assert store.client_options is None
+
+    def test_standard_var_wins_by_omission(self, monkeypatch):
+        from datasette_otel_parquet import _build_store
+
+        monkeypatch.setenv("AWS_ENDPOINT_URL", "http://standard.test:9000")
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://tigris.test:9000")
+        store = _build_store(url="s3://bkt/pfx")
+        # obstore reads AWS_ENDPOINT_URL itself at the client layer; .config
+        # only reflects explicitly passed kwargs, so "no endpoint in config"
+        # proves we did NOT pass the fallback kwarg over the standard var
+        assert store.config.get("endpoint") is None
+
+    def test_no_vars_no_kwarg(self):
+        from datasette_otel_parquet import _build_store
+
+        store = _build_store(url="s3://bkt/pfx")
+        assert store.config.get("endpoint") is None
