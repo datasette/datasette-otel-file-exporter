@@ -1,0 +1,21 @@
+.venv
+__pycache__/
+*.py[cod]
+*$py.class
+venv
+.eggs
+.pytest_cache
+*.egg-info
+.DS_Store
+.vscode
+dist
+build
+
+*.db
+*.csv
+.env
+
+# demo output - must never be committed
+telemetry/
+
+uv.lock

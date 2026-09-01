@@ -1,0 +1,41 @@
+[project]
+name = "datasette-otel-parquet"
+version = "0.1.0a0"
+description = "Flush Datasette's OpenTelemetry spans to Parquet files - local or object storage, no collector, no backend"
+readme = "README.md"
+authors = [{name = "Alex Garcia"}]
+license = "Apache-2.0"
+classifiers=[
+    "Framework :: Datasette"
+]
+requires-python = ">=3.10"
+dependencies = [
+    "datasette>=1a37",
+    "opentelemetry-sdk>=1.37",
+    "pyarrow>=17",
+    # tested against obstore 0.11.1
+    "obstore>=0.11",
+]
+
+[build-system]
+requires = ["setuptools"]
+build-backend = "setuptools.build_meta"
+
+[project.urls]
+Homepage = "https://github.com/datasette/datasette-otel-parquet"
+Changelog = "https://github.com/datasette/datasette-otel-parquet/releases"
+Issues = "https://github.com/datasette/datasette-otel-parquet/issues"
+CI = "https://github.com/datasette/datasette-otel-parquet/actions"
+
+[project.entry-points.datasette]
+otel_parquet = "datasette_otel_parquet"
+
+[dependency-groups]
+dev = ["pytest", "pytest-asyncio", "duckdb"]
+
+[tool.setuptools.packages.find]
+include = ["datasette_otel_parquet*"]
+
+[tool.pytest.ini_options]
+asyncio_mode = "strict"
+asyncio_default_fixture_loop_scope = "function"
