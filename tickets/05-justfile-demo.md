@@ -1,6 +1,13 @@
 # 05 — Justfile: demo + canned DuckDB queries
 
-Status: todo
+Status: done
+
+`just view` (datasette-parquet) tried and dropped: against the 1.0 alpha its
+SQL shim raises `DoubleQuoteForLiteraValue` on datasette's own internal
+queries (double-quoted literals rewrite), 500ing every page (tested
+2026-09-01, datasette-parquet from PyPI + editable datasette otel branch).
+Revisit when datasette-parquet catches up with 1.0; DuckDB recipes cover the
+payoff meanwhile.
 
 Make the payoff visible in two commands. Copy the Justfile conventions from
 `~/work/simonw/datasette-otel-otlp/Justfile`, including the
