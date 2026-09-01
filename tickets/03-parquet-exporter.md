@@ -1,6 +1,13 @@
 # 03 — Schema + ParquetSpanExporter + rolling writer
 
-Status: todo
+Status: done
+
+Deviation from the sketch below, measured during ticket 02: the interval trigger
+cannot rely on `export()` being called (the BatchSpanProcessor never visits an
+exporter while its queue is empty), so the exporter runs a small daemon flusher
+thread for idle periods. Writes happen on the processor's thread or that flusher
+thread — never the event loop, never a request path. `background_flush=False`
+disables it for fake-clock unit tests.
 
 The heart of the plugin: a `SpanExporter` that buffers finished spans and rolls them
 into Parquet files through an obstore store. This file's schema is the plugin's public
