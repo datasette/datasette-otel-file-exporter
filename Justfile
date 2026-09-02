@@ -29,8 +29,7 @@ default:
 test *options:
     uv run pytest {{ options }}
 
-# Run the test suite with datasette-otel-otlp installed, so the coexistence
-# tests run instead of skipping
+# Run the test suite with datasette-otel-otlp installed so coexistence tests run
 test-coexistence *options:
     uv run --with "{{ otlp_source }}" pytest {{ options }}
 
