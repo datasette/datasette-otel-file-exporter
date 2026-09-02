@@ -4,12 +4,15 @@
 #   ...browse http://localhost:8002 a bit...
 #   just query       # terminal 2: the canned DuckDB queries below
 #
-# Everything runs against an editable checkout of ~/projects/datasette on the
-# phase-1 otel branch (asg017/otel-phase1-* or later) - no released datasette
-# emits these spans yet. See PLAN.md.
+# Everything runs against datasette's phase-1 otel branch, resolved through the
+# [tool.uv.sources] override in pyproject.toml - no released datasette emits
+# these spans yet. See NOTES.md.
 
 telemetry := "./telemetry"
 glob := telemetry / "traces/**/*.parquet"
+
+# The sibling plugin the coexistence tests exercise
+otlp_source := "datasette-otel-otlp @ git+https://github.com/datasette/datasette-otel-otlp"
 
 # The S3 demo: versitygw serves a real S3 API over ./s3root; test creds only.
 # Absolute: versitygw resolves its backend root after changing directory
@@ -22,19 +25,14 @@ s3_endpoint := "http://127.0.0.1:7070"
 default:
     @just --list --unsorted
 
-# Run the test suite
-#
-# --no-project matters: the project venv resolves `datasette` from PyPI, which
-# shadows the --with-editable checkout on sys.path - and PyPI's alpha does not
-# emit the spans this plugin exports. datasette-otel-otlp is included for the
-# coexistence tests (they skip without it).
+# Run the test suite (coexistence tests skip without datasette-otel-otlp)
 test *options:
-    uv run --no-project --isolated \
-      --with-editable . \
-      --with-editable ~/projects/datasette \
-      --with-editable ~/work/simonw/datasette-otel-otlp \
-      --with pytest --with pytest-asyncio --with duckdb \
-      pytest {{ options }}
+    uv run pytest {{ options }}
+
+# Run the test suite with datasette-otel-otlp installed, so the coexistence
+# tests run instead of skipping
+test-coexistence *options:
+    uv run --with "{{ otlp_source }}" pytest {{ options }}
 
 # Generate demo.db (200-row table) if missing
 demo-db:
@@ -42,10 +40,7 @@ demo-db:
 
 # Datasette writing Parquet to ./telemetry - one -s flag, no env vars
 demo *options: demo-db
-    uv run --no-project --isolated \
-      --with-editable . \
-      --with-editable ~/projects/datasette \
-      datasette demo.db \
+    uv run datasette demo.db \
         -s plugins.datasette-otel-parquet.path {{ telemetry }} \
         -s plugins.datasette-otel-parquet.flush_interval_seconds 2 \
         -p 8002 {{ options }}
@@ -94,10 +89,7 @@ s3-gateway:
 demo-s3 *options: demo-db
     AWS_ACCESS_KEY_ID={{ s3_access }} AWS_SECRET_ACCESS_KEY={{ s3_secret }} \
     AWS_ENDPOINT_URL={{ s3_endpoint }} AWS_REGION=us-east-1 AWS_ALLOW_HTTP=true \
-    uv run --no-project --isolated \
-      --with-editable . \
-      --with-editable ~/projects/datasette \
-      datasette demo.db \
+    uv run datasette demo.db \
         -s plugins.datasette-otel-parquet.url s3://{{ s3_bucket }}/tel \
         -s plugins.datasette-otel-parquet.flush_interval_seconds 2 \
         -p 8002 {{ options }}

@@ -14,7 +14,8 @@ process the plugins import before datasette's first span resolves its
 ProxyTracer - and what these tests verify is the wiring topology, which the
 end-to-end tests cannot (they own the process-wide provider).
 
-Needs datasette-otel-otlp importable (wired by `just test`); skips without it.
+Needs datasette-otel-otlp importable (wired by `just test-coexistence`);
+skips without it.
 """
 
 import glob
