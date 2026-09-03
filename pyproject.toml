@@ -1,7 +1,7 @@
 [project]
-name = "datasette-otel-parquet"
+name = "datasette-otel-file-exporter"
 version = "0.1.0a0"
-description = "Flush Datasette's OpenTelemetry spans to Parquet files - local or object storage, no collector, no backend"
+description = "Export Datasette's OpenTelemetry spans to files - gzipped NDJSON or Parquet, a local directory or object storage. No collector, no backend"
 readme = "README.md"
 authors = [{name = "Alex Garcia"}]
 license = "Apache-2.0"
@@ -12,29 +12,33 @@ requires-python = ">=3.10"
 dependencies = [
     "datasette>=1a37",
     "opentelemetry-sdk>=1.37",
-    "pyarrow>=17",
-    # tested against obstore 0.11.1
-    "obstore>=0.11",
 ]
+
+[project.optional-dependencies]
+# format: parquet
+parquet = ["pyarrow>=17"]
+# url: s3:// gs:// az:// (tested against obstore 0.11.1)
+obstore = ["obstore>=0.11"]
 
 [build-system]
 requires = ["setuptools"]
 build-backend = "setuptools.build_meta"
 
 [project.urls]
-Homepage = "https://github.com/datasette/datasette-otel-parquet"
-Changelog = "https://github.com/datasette/datasette-otel-parquet/releases"
-Issues = "https://github.com/datasette/datasette-otel-parquet/issues"
-CI = "https://github.com/datasette/datasette-otel-parquet/actions"
+Homepage = "https://github.com/datasette/datasette-otel-file-exporter"
+Changelog = "https://github.com/datasette/datasette-otel-file-exporter/releases"
+Issues = "https://github.com/datasette/datasette-otel-file-exporter/issues"
+CI = "https://github.com/datasette/datasette-otel-file-exporter/actions"
 
 [project.entry-points.datasette]
-otel_parquet = "datasette_otel_parquet"
+otel_file_exporter = "datasette_otel_file_exporter"
 
 [dependency-groups]
-dev = ["pytest", "pytest-asyncio", "duckdb"]
+# Both extras, so the suite covers every format and store
+dev = ["pytest", "pytest-asyncio", "duckdb", "pyarrow>=17", "obstore>=0.11"]
 
 [tool.setuptools.packages.find]
-include = ["datasette_otel_parquet*"]
+include = ["datasette_otel_file_exporter*"]
 
 [tool.pytest.ini_options]
 asyncio_mode = "strict"

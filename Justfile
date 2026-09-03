@@ -1,15 +1,23 @@
 # Demo flow - the point: two commands from checkout to queryable traces.
 #
-#   just demo        # terminal 1: serve demo.db, flushing Parquet every 2s
+#   just demo        # terminal 1: serve demo.db, flushing gzipped NDJSON every 2s
 #   ...browse http://localhost:8002 a bit...
 #   just query       # terminal 2: the canned DuckDB queries below
+#   just jq          # ...or the newest file through jq
+#
+# FORMAT=parquet just demo / FORMAT=parquet just query for the Parquet flavour;
+# every query below is the same SQL, only the reader function changes.
 #
 # Everything runs against datasette's phase-1 otel branch, resolved through the
 # [tool.uv.sources] override in pyproject.toml - no released datasette emits
 # these spans yet. See NOTES.md.
 
 telemetry := "./telemetry"
-glob := telemetry / "traces/**/*.parquet"
+format := env("FORMAT", "ndjson")
+suffix := if format == "parquet" { "parquet" } else { "ndjson.gz" }
+reader := if format == "parquet" { "read_parquet" } else { "read_ndjson" }
+glob := telemetry / "traces/**/*." + suffix
+read := reader + "('" + glob + "')"
 
 # The sibling plugin the coexistence tests exercise
 otlp_source := "datasette-otel-otlp @ git+https://github.com/datasette/datasette-otel-otlp"
@@ -37,11 +45,12 @@ test-coexistence *options:
 demo-db:
     @[ -e demo.db ] || sqlite3 demo.db "create table plants(id integer primary key, name text, height_cm real); with recursive n(i) as (select 1 union all select i + 1 from n where i < 200) insert into plants select i, 'plant ' || i, abs(random() % 300) from n;"
 
-# Datasette writing Parquet to ./telemetry - one -s flag, no env vars
+# Datasette writing files to ./telemetry - -s flags only, no env vars
 demo *options: demo-db
     uv run datasette demo.db \
-        -s plugins.datasette-otel-parquet.path {{ telemetry }} \
-        -s plugins.datasette-otel-parquet.flush_interval_seconds 2 \
+        -s plugins.datasette-otel-file-exporter.path {{ telemetry }} \
+        -s plugins.datasette-otel-file-exporter.format {{ format }} \
+        -s plugins.datasette-otel-file-exporter.flush_interval_seconds 2 \
         -p 8002 {{ options }}
 
 # Make a traced request against `just demo`
@@ -51,25 +60,29 @@ request path="/demo/plants":
 # All three canned queries in one go
 query: slowest sql-hotspots requests-per-minute
 
+# The newest ndjson file, one line per span, through jq
+jq filter='{name, ms: (.duration_ns / 1e6)}':
+    @ls -t $(find {{ telemetry }}/traces -name '*.ndjson.gz') | head -1 | xargs gzip -dc | jq -c '{{ filter }}'
+
 # The 20 slowest spans
 slowest:
-    duckdb -c "SELECT name, round(duration_ns / 1e6, 2) AS ms, trace_id FROM read_parquet('{{ glob }}') ORDER BY ms DESC LIMIT 20;"
+    duckdb -c "SELECT name, round(duration_ns / 1e6, 2) AS ms, trace_id FROM {{ read }} ORDER BY ms DESC LIMIT 20;"
 
 # SQL statements ranked by total time spent in them
 sql-hotspots:
-    duckdb -c "SELECT left(regexp_replace(attributes ->> 'db.query.text', '\s+', ' ', 'g'), 72) AS sql, count(*) AS calls, round(sum(duration_ns) / 1e6, 2) AS total_ms FROM read_parquet('{{ glob }}') WHERE name = 'db.query' AND (attributes ->> 'db.query.text') IS NOT NULL GROUP BY sql ORDER BY total_ms DESC LIMIT 15;"
+    duckdb -c "SELECT left(regexp_replace(attributes ->> 'db.query.text', '\s+', ' ', 'g'), 72) AS sql, count(*) AS calls, round(sum(duration_ns) / 1e6, 2) AS total_ms FROM {{ read }} WHERE name = 'db.query' AND (attributes ->> 'db.query.text') IS NOT NULL GROUP BY sql ORDER BY total_ms DESC LIMIT 15;"
 
 # Requests per minute
 requests-per-minute:
-    duckdb -c "SELECT time_bucket(INTERVAL 1 minute, start_time) AS minute, count(*) AS requests FROM read_parquet('{{ glob }}') WHERE name LIKE 'GET %' GROUP BY minute ORDER BY minute;"
+    duckdb -c "SELECT time_bucket(INTERVAL 1 minute, to_timestamp(start_time_unix_nano / 1e9)) AS minute, count(*) AS requests FROM {{ read }} WHERE name LIKE 'GET %' GROUP BY minute ORDER BY minute;"
 
 # Recent traces, newest first - feed one id to `just trace`
 traces:
-    duckdb -c "SELECT trace_id, min(start_time) AS started, count(*) AS spans, any_value(name ORDER BY start_time_unix_nano) AS root FROM read_parquet('{{ glob }}') GROUP BY trace_id ORDER BY started DESC LIMIT 20;"
+    duckdb -c "SELECT trace_id, min(start_time) AS started, count(*) AS spans, any_value(name ORDER BY start_time_unix_nano) AS root FROM {{ read }} GROUP BY trace_id ORDER BY started DESC LIMIT 20;"
 
 # One trace's spans, indented by depth
 trace trace_id:
-    duckdb -c "WITH RECURSIVE spans AS (SELECT * FROM read_parquet('{{ glob }}') WHERE trace_id = '{{ trace_id }}'), tree AS (SELECT span_id, name, start_time_unix_nano, duration_ns, 0 AS depth FROM spans WHERE parent_span_id IS NULL OR parent_span_id NOT IN (SELECT span_id FROM spans) UNION ALL SELECT s.span_id, s.name, s.start_time_unix_nano, s.duration_ns, t.depth + 1 FROM spans s JOIN tree t ON s.parent_span_id = t.span_id) SELECT repeat('· ', depth) || name AS span, round(duration_ns / 1e6, 3) AS ms FROM tree ORDER BY start_time_unix_nano;"
+    duckdb -c "WITH RECURSIVE spans AS (SELECT * FROM {{ read }} WHERE trace_id = '{{ trace_id }}'), tree AS (SELECT span_id, name, start_time_unix_nano, duration_ns, 0 AS depth FROM spans WHERE parent_span_id IS NULL OR parent_span_id NOT IN (SELECT span_id FROM spans) UNION ALL SELECT s.span_id, s.name, s.start_time_unix_nano, s.duration_ns, t.depth + 1 FROM spans s JOIN tree t ON s.parent_span_id = t.span_id) SELECT repeat('· ', depth) || name AS span, round(duration_ns / 1e6, 3) AS ms FROM tree ORDER BY start_time_unix_nano;"
 
 # --- The off-box story: same plugin, url: instead of path:, creds from env ---
 #
@@ -89,14 +102,15 @@ demo-s3 *options: demo-db
     AWS_ACCESS_KEY_ID={{ s3_access }} AWS_SECRET_ACCESS_KEY={{ s3_secret }} \
     AWS_ENDPOINT_URL={{ s3_endpoint }} AWS_REGION=us-east-1 AWS_ALLOW_HTTP=true \
     uv run datasette demo.db \
-        -s plugins.datasette-otel-parquet.url s3://{{ s3_bucket }}/tel \
-        -s plugins.datasette-otel-parquet.flush_interval_seconds 2 \
+        -s plugins.datasette-otel-file-exporter.url s3://{{ s3_bucket }}/tel \
+        -s plugins.datasette-otel-file-exporter.format {{ format }} \
+        -s plugins.datasette-otel-file-exporter.flush_interval_seconds 2 \
         -p 8002 {{ options }}
 
 # DuckDB reads the bucket remotely - "a Datasette with a bucket has
 # observability with no other service"
 query-s3:
-    duckdb -c "CREATE SECRET vgw (TYPE s3, KEY_ID '{{ s3_access }}', SECRET '{{ s3_secret }}', ENDPOINT '127.0.0.1:7070', USE_SSL false, URL_STYLE path, REGION 'us-east-1'); SELECT name, round(duration_ns / 1e6, 2) AS ms, trace_id FROM read_parquet('s3://{{ s3_bucket }}/tel/traces/**/*.parquet') ORDER BY ms DESC LIMIT 20;"
+    duckdb -c "CREATE SECRET vgw (TYPE s3, KEY_ID '{{ s3_access }}', SECRET '{{ s3_secret }}', ENDPOINT '127.0.0.1:7070', USE_SSL false, URL_STYLE path, REGION 'us-east-1'); SELECT name, round(duration_ns / 1e6, 2) AS ms, trace_id FROM {{ reader }}('s3://{{ s3_bucket }}/tel/traces/**/*.{{ suffix }}') ORDER BY ms DESC LIMIT 20;"
 
 # Delete the demo's telemetry output (local files and the gateway's directory)
 clean:

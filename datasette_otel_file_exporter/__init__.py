@@ -1,5 +1,6 @@
 """
-Flush Datasette's OpenTelemetry spans to Parquet files.
+Export Datasette's OpenTelemetry spans to files: gzipped NDJSON or Parquet,
+in a local directory or an object-storage bucket.
 
 Datasette core emits spans through the OpenTelemetry API but never installs a
 TracerProvider, so without help every span is a NonRecordingSpan. Provider
@@ -13,9 +14,9 @@ datasette-otel-otlp, copied, not imported):
    ``datasette.startup`` span starts before any plugin hook runs.
 
 2. In the ``startup()`` hook, the first place plugin config is readable,
-   resolve ``path``/``flush_interval_seconds``/``max_buffer_spans``/
-   ``service_name`` and point the lazy exporter at a real
-   ``ParquetSpanExporter`` - or, with no ``path`` configured, drop
+   resolve ``path``/``url``/``format``/``flush_interval_seconds``/
+   ``max_buffer_spans``/``service_name`` and point the lazy exporter at a
+   real ``FileSpanExporter`` - or, with no destination configured, drop
    everything and sample nothing from then on (dormant).
 
 One deliberate difference from the otlp plugin: when a real SDK
@@ -23,7 +24,7 @@ One deliberate difference from the otlp plugin: when a real SDK
 agent, or datasette-otel-otlp imported first), this plugin does not go
 dormant - it attaches its processor to that provider with
 ``add_span_processor()`` and skips sampler/resource management entirely (the
-owner's sampler and service.name apply). Parquet-alongside-OTLP is a
+owner's sampler and service.name apply). Files-alongside-OTLP is a
 supported combo.
 
 Precedence: explicit ``OTEL_*`` environment variables beat plugin config,
@@ -46,16 +47,17 @@ from opentelemetry.sdk.trace.export import (
 )
 from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, DEFAULT_ON, Sampler
 
-from .exporter import ParquetSpanExporter
+from .exporter import DEFAULT_FORMAT, FileSpanExporter, check_format
+from .stores import LocalDirectoryStore, check_obstore, open_url_store
 
-PLUGIN_NAME = "datasette-otel-parquet"
+PLUGIN_NAME = "datasette-otel-file-exporter"
 DEFAULT_SERVICE_NAME = "datasette"
 DEFAULT_FLUSH_INTERVAL_SECONDS = 10
 DEFAULT_MAX_BUFFER_SPANS = 10000
 
 
 class _LazySpanExporter(SpanExporter):
-    """Stands in for the Parquet exporter until plugin config is readable.
+    """Stands in for the file exporter until plugin config is readable.
 
     The BatchSpanProcessor queues finished spans and only calls export()
     seconds after startup, so normally configure() has already run by the
@@ -202,7 +204,7 @@ def _install():
 
     _log(
         "a non-SDK TracerProvider is installed; cannot attach a span "
-        "processor - Parquet export is disabled"
+        "processor - file export is disabled"
     )
     _state["mode"] = "inert"
 
@@ -238,47 +240,10 @@ def _set_schedule_delay(processor, millis):
 
 
 def _build_store(path=None, url=None):
-    """LocalStore for path:, from_url for url: - the same write path either way.
-
-    Credentials for object-store URLs are never plugin config (datasette.yaml
-    gets committed to repos): obstore's native chain reads the standard env
-    vars (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL, ...),
-    instance metadata, etc., with automatic refresh.
-    """
+    "LocalDirectoryStore for path:, obstore for url: - the exporter sees one put()."
     if url is not None:
-        from datetime import timedelta
-
-        from obstore.store import from_url
-
-        # Spans are telemetry, not ledger entries: one retry (plus obstore's
-        # ~30s per-request timeout), then the exporter drops the batch with
-        # one log line. Never buffer unboundedly toward an unreachable
-        # bucket, never block process exit long on one. Client options
-        # (timeouts, allow_http) stay env-driven - passing client_options
-        # here would override the environment wholesale.
-        retry_config = {
-            "max_retries": 1,
-            "retry_timeout": timedelta(seconds=30),
-            "backoff": {
-                "init_backoff": timedelta(milliseconds=250),
-                "max_backoff": timedelta(seconds=2),
-                "base": 2,
-            },
-        }
-        store_kwargs = {}
-        # Fly.io's Tigris injects AWS_ENDPOINT_URL_S3, which obstore does not
-        # read; a per-key config kwarg fills the gap without touching
-        # client_options. AWS_ENDPOINT_URL, when set, wins by omission.
-        if (
-            url.startswith("s3://")
-            and "AWS_ENDPOINT_URL" not in os.environ
-            and os.environ.get("AWS_ENDPOINT_URL_S3")
-        ):
-            store_kwargs["endpoint"] = os.environ["AWS_ENDPOINT_URL_S3"]
-        return from_url(url, retry_config=retry_config, **store_kwargs)
-    from obstore.store import LocalStore
-
-    return LocalStore(prefix=path, mkdir=True)
+        return open_url_store(url)
+    return LocalDirectoryStore(path)
 
 
 def _configure(config):
@@ -311,10 +276,21 @@ def _configure(config):
             _state["sampler"].set_delegate(ALWAYS_OFF)
         _state["exporter"].configure(None)
         if not _state["dormant_logged"]:
-            _log("no path or url configured - Parquet export is disabled")
+            _log("no path or url configured - file export is disabled")
             _state["dormant_logged"] = True
         _state["mode"] = "dormant"
         return
+
+    # Misconfiguration (unknown format, an extra that is not installed)
+    # fails startup with an actionable message, before any store is opened:
+    # silently dropping every batch would be the worse outcome.
+    format_name = str(config.get("format", DEFAULT_FORMAT))
+    try:
+        check_format(format_name)
+        if url:
+            check_obstore()
+    except (ValueError, ImportError) as exception:
+        raise type(exception)(f"{PLUGIN_NAME}: {exception}") from exception
 
     flush_interval = float(
         config.get("flush_interval_seconds", DEFAULT_FLUSH_INTERVAL_SECONDS)
@@ -331,7 +307,7 @@ def _configure(config):
         _log(
             f"cannot open store for {url or path!r} "
             f"({type(exception).__name__}: {exception}) - "
-            "Parquet export is disabled"
+            "file export is disabled"
         )
         if owns and _state["sampler"] is not None:
             _state["sampler"].set_delegate(ALWAYS_OFF)
@@ -339,8 +315,9 @@ def _configure(config):
         _state["mode"] = "dormant"
         return
     _state["exporter"].configure(
-        ParquetSpanExporter(
+        FileSpanExporter(
             store,
+            format=format_name,
             flush_interval_seconds=flush_interval,
             max_buffer_spans=max_buffer_spans,
         )

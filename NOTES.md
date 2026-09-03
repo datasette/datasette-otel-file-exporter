@@ -1,32 +1,59 @@
-# datasette-otel-parquet
+# datasette-otel-file-exporter
 
-Flush the OpenTelemetry spans Datasette emits into Parquet files — a local
-directory, or any S3-compatible bucket. No collector, no tracing backend, no
-extra service: your traces are just files you own, and anything that reads
-Parquet queries them — DuckDB, pandas, Datasette itself. For a
-data-exploration tool the payoff is circular in the best way: the traces of
-your Datasette become a dataset. The file layout is borrowed from
-[celld.dev's telemetry design](https://celld.dev/docs/telemetry/), which
-proved the "a fleet with a bucket has observability with no other service"
-idea this plugin brings to Datasette.
+Export the OpenTelemetry spans Datasette emits into files — gzipped NDJSON
+by default, Parquet if you ask — in a local directory or any S3-compatible
+bucket. No collector, no tracing backend, no extra service: your traces are
+just files you own. `jq` reads them, DuckDB queries them, pandas loads them,
+Datasette itself can serve them. For a data-exploration tool the payoff is
+circular in the best way: the traces of your Datasette become a dataset. The
+file layout is borrowed from [celld.dev's telemetry
+design](https://celld.dev/docs/telemetry/), which proved the "a fleet with a
+bucket has observability with no other service" idea this plugin brings to
+Datasette.
 
 **Status: pre-release.** Requires the Datasette 1.0 alpha with OpenTelemetry
 support (simonw/datasette PRs #2862–#2864) — no released Datasette emits
 these spans yet.
 
+## Install
+
+```bash
+datasette install datasette-otel-file-exporter               # ndjson to a directory
+datasette install "datasette-otel-file-exporter[parquet]"    # + format: parquet (pyarrow)
+datasette install "datasette-otel-file-exporter[obstore]"    # + url: s3:// gs:// az:// (obstore)
+datasette install "datasette-otel-file-exporter[parquet,obstore]"
+```
+
+The base install has no compiled dependencies beyond what Datasette and the
+OpenTelemetry SDK already bring: gzipped NDJSON is stdlib, and a local
+directory needs nothing else. Parquet and object storage are extras because
+pyarrow and obstore are large wheels that a plugin writing JSON to a
+directory has no business dragging in.
+
 ## Quickstart
 
 ```bash
-datasette install datasette-otel-parquet
-datasette mydb.db -s plugins.datasette-otel-parquet.path ./telemetry
+datasette mydb.db -s plugins.datasette-otel-file-exporter.path ./telemetry
 ```
 
 Browse a few pages, then (from another terminal — files are immutable once
 written, so there is no lock contention with the live server):
 
 ```bash
+gzip -dc telemetry/traces/*/*/*/*/*.ndjson.gz | jq -c '{name, ms: (.duration_ns / 1e6)}'
+```
+
+```
+{"name":"datasette.startup","ms":7.72}
+{"name":"db.query","ms":1.33}
+{"name":"GET /(?P<database>[^\\/\\.]+)/(?P<table>[^\\/\\.]+)(\\.(?P<format>\\w+))?$","ms":30.94}
+```
+
+Or ask DuckDB, which reads the gzipped files directly:
+
+```bash
 duckdb -c "SELECT name, round(duration_ns / 1e6, 2) AS ms
-           FROM read_parquet('telemetry/traces/**/*.parquet')
+           FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
            ORDER BY ms DESC LIMIT 5;"
 ```
 
@@ -60,9 +87,10 @@ telemetry directory/bucket with the same care as the database it describes.
 ```yaml
 # datasette.yaml
 plugins:
-  datasette-otel-parquet:
+  datasette-otel-file-exporter:
     path: ./telemetry              # local directory (created if absent)
     # url: s3://my-bucket/telemetry  # ...or any obstore URL: s3:// gs:// az://
+    format: ndjson                 # or parquet (needs the [parquet] extra)
     flush_interval_seconds: 10     # roll a new file at most this often
     max_buffer_spans: 10000        # ...or when this many spans are buffered
     service_name: my-datasette     # default: "datasette"
@@ -71,6 +99,10 @@ plugins:
 - `path` **or** `url`, not both (configuring both is a startup error).
   Neither configured → the plugin stays dormant: one stderr line, no files,
   no recording overhead.
+- `format` is one of `ndjson` (default) or `parquet`. An unknown format, or
+  a format/URL whose extra is not installed, is a startup error with the
+  `pip install` line to fix it — a misconfigured telemetry plugin should not
+  quietly drop every batch.
 - `service_name` sets the `service.name` resource attribute (ignored when
   `OTEL_SERVICE_NAME` is set, or when another provider owns tracing — see
   Coexistence).
@@ -79,9 +111,10 @@ plugins:
 
 ### Object storage credentials
 
-Credentials are **never** plugin config — `datasette.yaml` gets committed to
-repos. `url:` stores authenticate through obstore's native chain: standard
-environment variables, instance metadata / IAM roles, with automatic refresh.
+`url:` needs the `[obstore]` extra. Credentials are **never** plugin config —
+`datasette.yaml` gets committed to repos. `url:` stores authenticate through
+obstore's native chain: standard environment variables, instance metadata /
+IAM roles, with automatic refresh.
 
 AWS S3:
 
@@ -89,7 +122,7 @@ AWS S3:
 export AWS_ACCESS_KEY_ID=...
 export AWS_SECRET_ACCESS_KEY=...
 export AWS_REGION=us-east-1
-datasette mydb.db -s plugins.datasette-otel-parquet.url s3://my-bucket/telemetry
+datasette mydb.db -s plugins.datasette-otel-file-exporter.url s3://my-bucket/telemetry
 ```
 
 Any S3-compatible service (Cloudflare R2, Tigris, MinIO, versitygw) is the
@@ -114,51 +147,92 @@ an unreachable bucket, and never blocks process exit for long on one.
 ## File layout
 
 ```
+<path or url prefix>/traces/<yyyy>/<mm>/<dd>/<hh>/<file_id>.ndjson.gz
 <path or url prefix>/traces/<yyyy>/<mm>/<dd>/<hh>/<file_id>.parquet
 ```
 
 Hour partitions (UTC, from the flush wall clock); `file_id` is
 `<unix_millis>-<random>` so names sort chronologically. Files are written
-once and never touched again. Small files are expected — DuckDB globs cope;
-compaction is deliberately out of scope.
+once and never touched again — local writes go to a temp sibling and are
+renamed into place, so a reader mid-glob never sees a partial file. Small
+files are expected — DuckDB globs cope; compaction is deliberately out of
+scope.
 
 ## Schema
 
-One row per span, flat, no nesting. The open-ended parts are JSON strings —
-`attributes ->> 'db.query.text'` works directly in DuckDB.
+One record per span, flat at the top level. The open-ended parts —
+`attributes`, `resource`, `events`, `links` — are nested. The record has two
+encodings, chosen by `format`; every query in the cookbook below reads both
+the same way.
 
-| column | arrow type | notes |
-|---|---|---|
-| `trace_id` | string | 32 lowercase hex chars (OTLP/JSON style, human-pasteable) |
-| `span_id` | string | 16 hex chars |
-| `parent_span_id` | string, nullable | null for root spans |
-| `name` | string | |
-| `kind` | string | `SERVER` / `INTERNAL` / `CLIENT` / ... (SpanKind name, not int) |
-| `start_time` | timestamp[us, UTC] | convenience column; DuckDB time-buckets it directly |
-| `start_time_unix_nano` | int64 | full precision |
-| `end_time_unix_nano` | int64 | |
-| `duration_ns` | int64 | derived, but the column every query wants |
-| `status_code` | string | `UNSET` / `OK` / `ERROR` |
-| `status_message` | string, nullable | |
-| `service_name` | string | pulled out of resource — the facetable column |
-| `scope_name` | string | instrumentation scope (`datasette`) |
-| `attributes` | string | JSON object; `attributes ->> 'db.query.text'` in DuckDB |
-| `resource` | string | JSON object, full resource attrs (includes service.name again) |
-| `events` | string, nullable | JSON array, null when empty |
-| `links` | string, nullable | JSON array, null when empty |
+| field | notes |
+|---|---|
+| `trace_id` | 32 lowercase hex chars (OTLP/JSON style, human-pasteable) |
+| `span_id` | 16 hex chars |
+| `parent_span_id` | null for root spans |
+| `name` | |
+| `kind` | `SERVER` / `INTERNAL` / `CLIENT` / ... (SpanKind name, not int) |
+| `start_time` | convenience rendering of `start_time_unix_nano`, see per-format notes |
+| `start_time_unix_nano` | int, full precision — use this for time math |
+| `end_time_unix_nano` | int |
+| `duration_ns` | int; derived, but the column every query wants |
+| `status_code` | `UNSET` / `OK` / `ERROR` |
+| `status_message` | nullable |
+| `service_name` | pulled out of resource — the facetable column |
+| `scope_name` | instrumentation scope (`datasette`) |
+| `attributes` | object; `attributes ->> 'db.query.text'` in DuckDB, `.attributes["db.query.text"]` in jq |
+| `resource` | object, full resource attrs (includes service.name again) |
+| `events` | array of `{name, timestamp_unix_nano, attributes}` |
+| `links` | array of `{trace_id, span_id, attributes}` |
 
-Every file embeds `datasette_otel_parquet_schema = "1"` in its Parquet
-key-value metadata. Within schema v1, changes are additive only — columns
-will never be renamed, retyped or removed without a version bump you can
-detect from that metadata.
+**ndjson** (`.ndjson.gz`): one JSON object per line, gzip. Nested parts are
+real JSON objects/arrays (empty arrays when there are none), `start_time` is
+an ISO-8601 UTC string with microseconds (`2026-09-03T17:10:26.594728Z`),
+and every line starts with `"schema_version": 1` — a JSON file has nowhere
+else to carry it. DuckDB's `read_ndjson` infers the nested parts as structs
+and the `->>` operator works on them unchanged.
+
+**parquet** (`.parquet`, `[parquet]` extra): the nested parts are JSON
+**strings** (`attributes ->> 'key'` reads them identically), empty
+`events`/`links` are null, `start_time` is `timestamp[us, UTC]`, and the
+schema version is the file's `datasette_otel_file_exporter_schema = "1"`
+key-value metadata. Arrow types:
+
+| column | arrow type |
+|---|---|
+| `trace_id`, `span_id`, `name`, `kind`, `status_code`, `service_name`, `scope_name`, `attributes`, `resource` | string |
+| `parent_span_id`, `status_message`, `events`, `links` | string, nullable |
+| `start_time` | timestamp[us, UTC] |
+| `start_time_unix_nano`, `end_time_unix_nano`, `duration_ns` | int64 |
+
+Within schema v1, changes are additive only, in both encodings — fields will
+never be renamed, retyped or removed without a version bump you can detect
+from the per-line field or the Parquet metadata.
+
+Not a format here: OTLP/JSON, the encoding the OpenTelemetry Collector's own
+file exporter writes and its file receiver reads back. It is deeply nested
+and built for machines re-ingesting it, not for `jq` or SQL. If a Collector
+round-trip matters to you, it would be a third `format`, not a change to
+these two — open an issue.
 
 ## Cookbook
+
+Everything below is written against the ndjson default. For Parquet, swap
+`read_ndjson('…/*.ndjson.gz')` for `read_parquet('…/*.parquet')` — the SQL
+is otherwise identical.
+
+Follow the newest file with jq:
+
+```bash
+ls -t telemetry/traces/*/*/*/*/*.ndjson.gz | head -1 | xargs gzip -dc \
+  | jq -c 'select(.name == "db.query") | {ms: (.duration_ns / 1e6), sql: .attributes["db.query.text"]}'
+```
 
 The 20 slowest spans:
 
 ```sql
 SELECT name, round(duration_ns / 1e6, 2) AS ms, trace_id
-FROM read_parquet('telemetry/traces/**/*.parquet')
+FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
 ORDER BY ms DESC LIMIT 20;
 ```
 
@@ -168,16 +242,20 @@ SQL statements ranked by total time spent in them:
 SELECT attributes ->> 'db.query.text' AS sql,
        count(*) AS calls,
        round(sum(duration_ns) / 1e6, 2) AS total_ms
-FROM read_parquet('telemetry/traces/**/*.parquet')
+FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
 WHERE name = 'db.query' AND (attributes ->> 'db.query.text') IS NOT NULL
 GROUP BY sql ORDER BY total_ms DESC LIMIT 15;
 ```
 
-Requests per minute:
+Requests per minute — from the nanosecond column, which behaves the same in
+both formats and every DuckDB version (whether `read_ndjson` infers the ISO
+`start_time` string as a timestamp depends on the DuckDB release, and a naive
+timestamp cast to `TIMESTAMPTZ` picks up your session zone):
 
 ```sql
-SELECT time_bucket(INTERVAL 1 minute, start_time) AS minute, count(*) AS requests
-FROM read_parquet('telemetry/traces/**/*.parquet')
+SELECT time_bucket(INTERVAL 1 minute, to_timestamp(start_time_unix_nano / 1e9)) AS minute,
+       count(*) AS requests
+FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
 WHERE name LIKE 'GET %'
 GROUP BY minute ORDER BY minute;
 ```
@@ -186,7 +264,7 @@ One trace as an indented tree (also available as `just trace <trace_id>`):
 
 ```sql
 WITH RECURSIVE spans AS (
-  SELECT * FROM read_parquet('telemetry/traces/**/*.parquet')
+  SELECT * FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
   WHERE trace_id = 'PASTE_A_TRACE_ID_HERE'
 ), tree AS (
   SELECT span_id, name, start_time_unix_nano, duration_ns, 0 AS depth
@@ -206,7 +284,7 @@ Querying a bucket instead of a directory is the same queries with an S3 glob
 ```sql
 CREATE SECRET (TYPE s3, KEY_ID '...', SECRET '...', REGION '...');
 -- then
-SELECT ... FROM read_parquet('s3://my-bucket/telemetry/traces/**/*.parquet');
+SELECT ... FROM read_ndjson('s3://my-bucket/telemetry/traces/**/*.ndjson.gz');
 ```
 
 (Serving the telemetry directory back through Datasette via
@@ -219,7 +297,7 @@ This plugin installs a `TracerProvider` only when nobody else has. If a real
 provider already exists — `opentelemetry-instrument`, or
 [datasette-otel-otlp](https://github.com/datasette/datasette-otel-otlp)
 imported first — it **attaches its processor to that provider** instead:
-Parquet-alongside-OTLP is a supported combo, and the owner's sampler and
+files-alongside-OTLP is a supported combo, and the owner's sampler and
 `service.name` apply.
 
 Since datasette-otel-otlp's ticket 08 (attach-don't-abdicate), the
@@ -228,15 +306,16 @@ provider, the other attaches to it, and both export in either order. A
 dormant (endpoint-less) otlp install no longer turns sampling off when
 another processor is attached to its provider. One residual caveat: if the
 provider this plugin attaches to samples nothing (an agent configured with
-an always-off sampler, or a pre-fix otlp build), no spans reach the Parquet
-files — this plugin prints a loud stderr line when it can see that at
-startup.
+an always-off sampler, or a pre-fix otlp build), no spans reach the files —
+this plugin prints a loud stderr line when it can see that at startup.
 
 ## Development
 
 ```bash
-just test    # test suite (needs the editable datasette checkout on the otel branch)
-just demo    # local-directory demo on :8002, 2s flush
+just test    # test suite; the dev group installs both extras so every format and store is covered
+just demo    # local-directory demo on :8002, 2s flush, ndjson
+just jq      # the newest file through jq
 just query   # canned DuckDB queries against the demo output
+FORMAT=parquet just demo   # the same demo writing Parquet (and FORMAT=parquet just query)
 just s3-gateway && just demo-s3 && just query-s3   # the same demo against a live S3 API (versitygw)
 ```

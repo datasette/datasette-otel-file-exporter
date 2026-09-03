@@ -32,7 +32,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 
-import datasette_otel_parquet
+import datasette_otel_file_exporter
 from conftest import reset_tracer_state
 
 otlp_plugin = pytest.importorskip("datasette_otel_otlp")
@@ -64,7 +64,7 @@ def otlp_receiver():
 
 async def run_startup(tel_path, endpoint=None):
     "Let both plugins' startup() hooks resolve config, the real code path."
-    plugins = {"datasette-otel-parquet": {"path": str(tel_path)}}
+    plugins = {"datasette-otel-file-exporter": {"path": str(tel_path)}}
     if endpoint is not None:
         plugins["datasette-otel-otlp"] = {"endpoint": endpoint}
     datasette = Datasette([], memory=True, config={"plugins": plugins})
@@ -78,20 +78,20 @@ def emit_span(name):
         pass
 
 
-def parquet_names(tel_path):
-    if not glob.glob(f"{tel_path}/traces/**/*.parquet", recursive=True):
+def exported_names(tel_path):
+    if not glob.glob(f"{tel_path}/traces/**/*.ndjson.gz", recursive=True):
         return set()
     rows = duckdb.sql(
-        f"SELECT DISTINCT name FROM read_parquet('{tel_path}/traces/**/*.parquet')"
+        f"SELECT DISTINCT name FROM read_ndjson('{tel_path}/traces/**/*.ndjson.gz')"
     ).fetchall()
-    return {name for (name,) in rows}
+    return {row[0] for row in rows}
 
 
 def flush_everything():
     # In attached mode _state["provider"] is the shared (foreign) provider,
     # so this drains every processor hanging off it, then rolls our file.
-    datasette_otel_parquet._state["provider"].force_flush()
-    datasette_otel_parquet._state["exporter"].force_flush()
+    datasette_otel_file_exporter._state["provider"].force_flush()
+    datasette_otel_file_exporter._state["exporter"].force_flush()
 
 
 @pytest.mark.asyncio
@@ -100,8 +100,8 @@ async def test_otlp_first_both_export(tmp_path, otlp_receiver):
     otlp_plugin._install()
     assert otlp_plugin._state["mode"] == "pending"
 
-    datasette_otel_parquet._install()
-    state = datasette_otel_parquet._state
+    datasette_otel_file_exporter._install()
+    state = datasette_otel_file_exporter._state
     assert state["owns_provider"] is False
     assert state["provider"] is otlp_plugin._state["provider"]
 
@@ -113,23 +113,23 @@ async def test_otlp_first_both_export(tmp_path, otlp_receiver):
     emit_span("both-pipelines-see-this")
     flush_everything()
 
-    assert "both-pipelines-see-this" in parquet_names(tel)
+    assert "both-pipelines-see-this" in exported_names(tel)
     assert len(otlp_receiver.posts) >= 1
 
 
 @pytest.mark.asyncio
-async def test_parquet_first_both_export(tmp_path, otlp_receiver):
+async def test_files_first_both_export(tmp_path, otlp_receiver):
     """When this plugin owns the provider, the otlp plugin attaches its
     processor and both pipelines export (otlp ticket 08 fixed the old
     go-foreign-and-export-nothing behavior ticket 02 had measured)."""
     reset_tracer_state()
-    datasette_otel_parquet._install()
-    assert datasette_otel_parquet._state["owns_provider"] is True
+    datasette_otel_file_exporter._install()
+    assert datasette_otel_file_exporter._state["owns_provider"] is True
 
     otlp_plugin._install()
     assert otlp_plugin._state["mode"] == "pending"
     assert otlp_plugin._state["owns_provider"] is False
-    assert otlp_plugin._state["provider"] is datasette_otel_parquet._state["provider"]
+    assert otlp_plugin._state["provider"] is datasette_otel_file_exporter._state["provider"]
 
     tel = tmp_path / "tel"
     await run_startup(tel, endpoint=otlp_receiver.endpoint)
@@ -138,7 +138,7 @@ async def test_parquet_first_both_export(tmp_path, otlp_receiver):
     emit_span("either-order-works")
     flush_everything()
 
-    assert "either-order-works" in parquet_names(tel)
+    assert "either-order-works" in exported_names(tel)
     assert len(otlp_receiver.posts) >= 1
 
 
@@ -151,20 +151,20 @@ async def test_attaches_to_agent_installed_provider(tmp_path, capsys):
     agent_provider.add_span_processor(SimpleSpanProcessor(collected))
     trace.set_tracer_provider(agent_provider)
 
-    datasette_otel_parquet._install()
-    assert datasette_otel_parquet._state["owns_provider"] is False
+    datasette_otel_file_exporter._install()
+    assert datasette_otel_file_exporter._state["owns_provider"] is False
     assert trace.get_tracer_provider() is agent_provider
 
     tel = tmp_path / "tel"
     await run_startup(tel)
 
-    emit_span("agent-and-parquet")
+    emit_span("agent-and-files")
     flush_everything()
 
     assert trace.get_tracer_provider() is agent_provider
-    assert "agent-and-parquet" in parquet_names(tel)
+    assert "agent-and-files" in exported_names(tel)
     # The agent's own pipeline still sees everything too
-    assert "agent-and-parquet" in {
+    assert "agent-and-files" in {
         span.name for span in collected.get_finished_spans()
     }
     # The default sampler must not trip the starvation warning
@@ -181,15 +181,15 @@ async def test_dormant_otlp_no_longer_starves_attached_processor(tmp_path):
     real agents whose sampler is off."""
     reset_tracer_state()
     otlp_plugin._install()
-    datasette_otel_parquet._install()
-    assert datasette_otel_parquet._state["owns_provider"] is False
+    datasette_otel_file_exporter._install()
+    assert datasette_otel_file_exporter._state["owns_provider"] is False
 
     tel = tmp_path / "tel"
     await run_startup(tel)  # otlp present but unconfigured
     assert otlp_plugin._state["mode"] == "dormant"
-    assert datasette_otel_parquet._state["mode"] == "active"
+    assert datasette_otel_file_exporter._state["mode"] == "active"
 
-    emit_span("parquet-sees-this")
+    emit_span("files-see-this")
     flush_everything()
 
-    assert "parquet-sees-this" in parquet_names(tel)
+    assert "files-see-this" in exported_names(tel)

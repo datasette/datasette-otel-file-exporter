@@ -29,12 +29,12 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 from opentelemetry.sdk.trace.sampling import ALWAYS_OFF, DEFAULT_ON
 
-import datasette_otel_parquet
-from datasette_otel_parquet import _set_schedule_delay
+import datasette_otel_file_exporter
+from datasette_otel_file_exporter import _set_schedule_delay
 
 # The provider the plugin installed when this module imported it, plus the
 # original resource attributes - the baseline every test starts from.
-_SNAPSHOT = dict(datasette_otel_parquet._state)
+_SNAPSHOT = dict(datasette_otel_file_exporter._state)
 _SNAPSHOT_RESOURCE_ATTRIBUTES = dict(_SNAPSHOT["resource"].attributes)
 
 
@@ -58,7 +58,7 @@ def reset_otel():
     # tests do), point the world back at the plugin's own
     trace._TRACER_PROVIDER = _SNAPSHOT["provider"]
     trace._TRACER_PROVIDER_SET_ONCE._done = True
-    state = datasette_otel_parquet._state
+    state = datasette_otel_file_exporter._state
     state.clear()
     state.update(_SNAPSHOT)
     state["mode"] = "pending"
@@ -95,14 +95,14 @@ def reset_otel():
 
 
 def flush():
-    """Push every finished span through to Parquet files.
+    """Push every finished span through to files.
 
     Two stages because the BatchSpanProcessor's force_flush only drains its
     queue into exporter.export() - it never calls the exporter's own
     force_flush - and export() buffers rows until a roll trigger fires.
     """
-    datasette_otel_parquet._state["provider"].force_flush()
-    datasette_otel_parquet._state["exporter"].force_flush()
+    datasette_otel_file_exporter._state["provider"].force_flush()
+    datasette_otel_file_exporter._state["exporter"].force_flush()
 
 
 def make_test_spans(count=1, name="span"):
