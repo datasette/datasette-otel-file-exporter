@@ -20,7 +20,7 @@ glob := telemetry / "traces/**/*." + suffix
 read := reader + "('" + glob + "')"
 
 # The sibling plugin the coexistence tests exercise
-otlp_source := "datasette-otel-otlp @ git+https://github.com/datasette/datasette-otel-otlp"
+otlp_source := "datasette-otel-otlp-exporter @ git+https://github.com/datasette/datasette-otel-otlp"
 
 # The S3 demo: versitygw serves a real S3 API over ./s3root; test creds only.
 # Absolute: versitygw resolves its backend root after changing directory
@@ -53,12 +53,42 @@ demo *options: demo-db
         -s plugins.datasette-otel-file-exporter.flush_interval_seconds 2 \
         -p 8002 {{ options }}
 
+# The viewer recipe below: the same spans browsable in-instance at
+# http://localhost:8002/-/otel/traces while the files are written - including
+# this plugin's own otel_file_exporter.flush spans, and (the viewer installs a
+# MeterProvider) its otel_file_exporter.* metrics at /-/otel/metrics. Rows
+# land in ./otel.db.
+#
+# Import order is load-bearing: the viewer must own the TracerProvider (its
+# suppressing sampler is what keeps its own store writes from feeding back),
+# and this plugin then attaches to it - the "attaching to the
+# already-installed TracerProvider" stderr line at startup confirms that.
+# `uv run --with` puts the viewer in an ephemeral environment ahead of the
+# project venv on sys.path, so its entry point imports first. If you ever see
+# the viewer complain that another TracerProvider was installed before it,
+# the order lost and /-/otel will be empty.
+#
+# `--with ../` rather than a dependency group: the viewer is not on PyPI, and
+# uv locks every group, so an unresolvable path in pyproject.toml would break
+# plain `uv run` for anyone without the sibling checkout (same reasoning as
+# datasette-paper's and datasette-agent's Justfiles).
+
+# `demo` plus the sibling ../datasette-otel-viewer - browse the spans at /-/otel
+demo-viewer *options: demo-db
+    uv run --no-cache --with ../datasette-otel-viewer datasette demo.db \
+        -s plugins.datasette-otel-file-exporter.path {{ telemetry }} \
+        -s plugins.datasette-otel-file-exporter.format {{ format }} \
+        -s plugins.datasette-otel-file-exporter.flush_interval_seconds 2 \
+        -s plugins.datasette-otel-viewer.public_viewer true \
+        -s plugins.datasette-otel-viewer.db_path otel.db \
+        -p 8002 {{ options }}
+
 # Make a traced request against `just demo`
 request path="/demo/plants":
     curl -s -o /dev/null -w "%{http_code}\n" 'http://localhost:8002{{ path }}'
 
-# All three canned queries in one go
-query: slowest sql-hotspots requests-per-minute
+# All four canned queries in one go
+query: slowest sql-hotspots requests-per-minute flushes
 
 # The newest ndjson file, one line per span, through jq
 jq filter='{name, ms: (.duration_ns / 1e6)}':
@@ -75,6 +105,10 @@ sql-hotspots:
 # Requests per minute
 requests-per-minute:
     duckdb -c "SELECT time_bucket(INTERVAL 1 minute, to_timestamp(start_time_unix_nano / 1e9)) AS minute, count(*) AS requests FROM {{ read }} WHERE name LIKE 'GET %' GROUP BY minute ORDER BY minute;"
+
+# The exporter's own telemetry: files, bytes and PUT latency per hour, then any dropped batches
+flushes:
+    duckdb -c "SELECT time_bucket(INTERVAL 1 hour, to_timestamp(start_time_unix_nano / 1e9)) AS hour, count(*) AS files, sum((attributes ->> 'otel_file_exporter.file.size_bytes')::BIGINT) AS bytes, sum((attributes ->> 'otel_file_exporter.spans')::BIGINT) AS spans, round(quantile_cont(duration_ns - (attributes ->> 'otel_file_exporter.encode_ns')::BIGINT, 0.95) / 1e6, 1) AS put_p95_ms FROM {{ read }} WHERE name = 'otel_file_exporter.flush' AND status_code = 'OK' GROUP BY hour ORDER BY hour; SELECT start_time, attributes ->> 'error.type' AS error, status_message, (attributes ->> 'otel_file_exporter.spans')::BIGINT AS spans_lost FROM {{ read }} WHERE name = 'otel_file_exporter.flush' AND status_code = 'ERROR' ORDER BY start_time_unix_nano;"
 
 # Recent traces, newest first - feed one id to `just trace`
 traces:
@@ -112,6 +146,6 @@ demo-s3 *options: demo-db
 query-s3:
     duckdb -c "CREATE SECRET vgw (TYPE s3, KEY_ID '{{ s3_access }}', SECRET '{{ s3_secret }}', ENDPOINT '127.0.0.1:7070', USE_SSL false, URL_STYLE path, REGION 'us-east-1'); SELECT name, round(duration_ns / 1e6, 2) AS ms, trace_id FROM {{ reader }}('s3://{{ s3_bucket }}/tel/traces/**/*.{{ suffix }}') ORDER BY ms DESC LIMIT 20;"
 
-# Delete the demo's telemetry output (local files and the gateway's directory)
+# Delete the demo's telemetry output (local files, the viewer's store, the gateway's directory)
 clean:
-    rm -rf {{ telemetry }} {{ s3_root }}
+    rm -rf {{ telemetry }} {{ s3_root }} otel.db

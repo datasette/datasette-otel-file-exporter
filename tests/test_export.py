@@ -20,7 +20,9 @@ from datasette.app import Datasette
 import datasette_otel_file_exporter
 from conftest import flush
 from datasette_otel_file_exporter.exporter import (
+    FLUSH_SPAN,
     SCHEMA_METADATA_KEY,
+    SCOPE_NAME,
     parquet_schema,
 )
 
@@ -356,3 +358,105 @@ async def test_base_install_needs_no_extras(tmp_path, monkeypatch):
     flush()
     names = {row[0] for row in read(tel, "SELECT DISTINCT name FROM $T")}
     assert "datasette.startup" in names
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("format", FORMATS)
+async def test_exporter_records_its_own_writes(tmp_path, demo_db, format):
+    """Each file's write is described by an otel_file_exporter.flush span in
+    the *next* file, with the actual on-disk size."""
+    import os
+
+    tel = tmp_path / "tel"
+    datasette = make_datasette([str(demo_db)], path=str(tel), format=format)
+    assert (await datasette.client.get("/")).status_code == 200
+    flush()
+    (first,) = exported_files(tel)
+    # The flush span is queued, not yet written - and on its own it must not
+    # roll a second file
+    flush()
+    assert exported_files(tel) == [first]
+
+    assert (await datasette.client.get("/demo/plants")).status_code == 200
+    flush()
+    assert len(exported_files(tel)) == 2
+
+    own = read(
+        tel,
+        "SELECT name, status_code, scope_name, "
+        "attributes ->> 'otel_file_exporter.file.key', "
+        "(attributes ->> 'otel_file_exporter.file.size_bytes')::BIGINT, "
+        "(attributes ->> 'otel_file_exporter.spans')::BIGINT, "
+        "attributes ->> 'otel_file_exporter.trigger', "
+        "attributes ->> 'otel_file_exporter.store', "
+        "attributes ->> 'otel_file_exporter.format' "
+        f"FROM $T WHERE scope_name = '{SCOPE_NAME}'",
+        format,
+    )
+    (
+        (name, status, scope, key, size, spans, trigger, store, fmt),
+    ) = own
+    assert name == FLUSH_SPAN and status == "OK"
+    assert str(tel / key) == first
+    assert size == os.path.getsize(first)
+    assert (trigger, store, fmt) == ("force_flush", "file", format)
+    first_rows = read(
+        tel,
+        f"SELECT count(*) FROM {READER[format]}('{first}')",
+        format,
+    )[0][0]
+    assert spans == first_rows
+
+
+def test_idle_server_stops_writing(tmp_path, demo_db):
+    """The feedback loop, end to end: after the last request is exported, a
+    server with a short flush interval must not keep rolling files that
+    describe only their predecessors."""
+    tel = tmp_path / "tel"
+    port = _free_port()
+    process = subprocess.Popen(
+        [
+            sys.executable,
+            "-m",
+            "datasette",
+            str(demo_db),
+            "-p",
+            str(port),
+            "-s",
+            "plugins.datasette-otel-file-exporter.path",
+            str(tel),
+            "-s",
+            "plugins.datasette-otel-file-exporter.flush_interval_seconds",
+            "0.5",
+        ],
+        stdout=subprocess.DEVNULL,
+        stderr=subprocess.DEVNULL,
+    )
+    try:
+        deadline = time.time() + 20
+        while True:
+            try:
+                urllib.request.urlopen(
+                    f"http://127.0.0.1:{port}/demo/plants", timeout=1
+                )
+                break
+            except Exception:
+                if time.time() > deadline:
+                    raise
+                time.sleep(0.2)
+        # Let the request's spans roll (BSP cadence 0.5s + flush interval 0.5s)
+        deadline = time.time() + 10
+        while not exported_files(tel) and time.time() < deadline:
+            time.sleep(0.1)
+        time.sleep(1.5)
+        settled = exported_files(tel)
+        assert settled
+        # Six more flush intervals of idleness: no new files
+        time.sleep(3)
+        assert exported_files(tel) == settled
+    finally:
+        process.send_signal(signal.SIGINT)
+        try:
+            process.wait(timeout=20)
+        finally:
+            process.kill()

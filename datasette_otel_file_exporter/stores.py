@@ -3,9 +3,12 @@ Where the files go. Two stores, one interface: ``put(key, bytes)``.
 
 - ``LocalDirectoryStore`` - a directory, stdlib only. The base install
   writes gzipped NDJSON to a local path with no compiled dependency at all.
-- obstore, via ``open_url_store`` - any ``s3://``, ``gs://``, ``az://`` or
-  ``file://`` URL, behind the ``[obstore]`` extra. obstore's store objects
-  already expose ``put(path, bytes)``, so nothing wraps them.
+- ``UrlStore``, via ``open_url_store`` - any ``s3://``, ``gs://``, ``az://``
+  or ``file://`` URL, behind the ``[obstore]`` extra. A thin wrapper over
+  obstore's store object that pins every put to a single request.
+
+Both expose ``scheme`` (``file`` for the directory, the URL's scheme
+otherwise), which the exporter records on its own flush span.
 
 Same hard rule as the exporter: nothing here imports from ``datasette``.
 """
@@ -21,6 +24,8 @@ class LocalDirectoryStore:
     reader globbing the directory (DuckDB, ``tail -f``, the demo) never
     sees a half-written file. The temp name never matches a format's glob.
     """
+
+    scheme = "file"
 
     def __init__(self, root):
         self.root = os.path.abspath(str(root))
@@ -54,6 +59,28 @@ def check_obstore():
             "'url' needs obstore, which is not installed: "
             "pip install 'datasette-otel-file-exporter[obstore]'"
         ) from exception
+
+
+class UrlStore:
+    """An obstore store behind ``put(key, bytes)``: one request per file.
+
+    ``use_multipart=False`` makes the request count a guarantee rather than a
+    measurement - obstore is Rust and exposes no per-call request or retry
+    count, so this is how "how many PUTs did I pay for?" becomes answerable:
+    it is the number of successful ``otel_file_exporter.flush`` spans (plus
+    at most one retry each, per the retry policy below). Files are bounded by
+    ``max_buffer_spans`` at single-digit megabytes, far under the 5 GB
+    single-PUT limit, and skipping multipart also rules out the orphaned
+    multipart uploads obstore's docs warn about.
+    """
+
+    def __init__(self, url, store):
+        self.url = url
+        self.scheme = url.split("://", 1)[0] if "://" in url else "unknown"
+        self.inner = store  # the obstore store object
+
+    def put(self, key, data):
+        self.inner.put(key, data, use_multipart=False)
 
 
 def open_url_store(url):
@@ -93,4 +120,4 @@ def open_url_store(url):
         and os.environ.get("AWS_ENDPOINT_URL_S3")
     ):
         store_kwargs["endpoint"] = os.environ["AWS_ENDPOINT_URL_S3"]
-    return from_url(url, retry_config=retry_config, **store_kwargs)
+    return UrlStore(url, from_url(url, retry_config=retry_config, **store_kwargs))

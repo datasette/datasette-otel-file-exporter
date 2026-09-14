@@ -351,9 +351,9 @@ class TestBuildStoreEndpointFallback:
 
         monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://tigris.test:9000")
         store = _build_store(url="s3://bkt/pfx")
-        assert store.config.get("endpoint") == "http://tigris.test:9000"
+        assert store.inner.config.get("endpoint") == "http://tigris.test:9000"
         # client_options must stay unset (env-driven; see ticket 07's trap)
-        assert store.client_options is None
+        assert store.inner.client_options is None
 
     def test_standard_var_wins_by_omission(self, monkeypatch):
         from datasette_otel_file_exporter import _build_store
@@ -364,10 +364,10 @@ class TestBuildStoreEndpointFallback:
         # obstore reads AWS_ENDPOINT_URL itself at the client layer; .config
         # only reflects explicitly passed kwargs, so "no endpoint in config"
         # proves we did NOT pass the fallback kwarg over the standard var
-        assert store.config.get("endpoint") is None
+        assert store.inner.config.get("endpoint") is None
 
     def test_no_vars_no_kwarg(self):
         from datasette_otel_file_exporter import _build_store
 
         store = _build_store(url="s3://bkt/pfx")
-        assert store.config.get("endpoint") is None
+        assert store.inner.config.get("endpoint") is None

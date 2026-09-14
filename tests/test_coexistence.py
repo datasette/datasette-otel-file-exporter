@@ -14,7 +14,7 @@ process the plugins import before datasette's first span resolves its
 ProxyTracer - and what these tests verify is the wiring topology, which the
 end-to-end tests cannot (they own the process-wide provider).
 
-Needs datasette-otel-otlp importable (wired by `just test-coexistence`);
+Needs datasette-otel-otlp-exporter importable (wired by `just test-coexistence`);
 skips without it.
 """
 
@@ -35,7 +35,7 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 import datasette_otel_file_exporter
 from conftest import reset_tracer_state
 
-otlp_plugin = pytest.importorskip("datasette_otel_otlp")
+otlp_plugin = pytest.importorskip("datasette_otel_otlp_exporter")
 
 
 @pytest.fixture
@@ -66,7 +66,7 @@ async def run_startup(tel_path, endpoint=None):
     "Let both plugins' startup() hooks resolve config, the real code path."
     plugins = {"datasette-otel-file-exporter": {"path": str(tel_path)}}
     if endpoint is not None:
-        plugins["datasette-otel-otlp"] = {"endpoint": endpoint}
+        plugins["datasette-otel-otlp-exporter"] = {"endpoint": endpoint}
     datasette = Datasette([], memory=True, config={"plugins": plugins})
     await datasette.invoke_startup()
     return datasette
@@ -163,10 +163,11 @@ async def test_attaches_to_agent_installed_provider(tmp_path, capsys):
 
     assert trace.get_tracer_provider() is agent_provider
     assert "agent-and-files" in exported_names(tel)
-    # The agent's own pipeline still sees everything too
-    assert "agent-and-files" in {
-        span.name for span in collected.get_finished_spans()
-    }
+    # The agent's own pipeline still sees everything too - including the
+    # exporter's own span about the file it just wrote
+    names = {span.name for span in collected.get_finished_spans()}
+    assert "agent-and-files" in names
+    assert "otel_file_exporter.flush" in names
     # The default sampler must not trip the starvation warning
     assert "samples nothing" not in capsys.readouterr().err
 

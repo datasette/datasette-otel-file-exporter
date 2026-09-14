@@ -291,6 +291,90 @@ SELECT ... FROM read_ndjson('s3://my-bucket/telemetry/traces/**/*.ndjson.gz');
 datasette-parquet is the natural next trick; it currently fights the 1.0
 alphas — see `tickets/05-justfile-demo.md`.)
 
+## The exporter's own telemetry
+
+Every file the plugin writes is itself recorded as a span,
+`otel_file_exporter.flush`, in the plugin's own instrumentation scope
+(`scope_name = 'datasette_otel_file_exporter'`). It lands in the *next* file,
+so the files describe the pipeline that wrote them: bytes shipped per hour,
+files per hour, PUT latency, failures. No schema change — it is an ordinary
+record, and `WHERE scope_name != 'datasette_otel_file_exporter'` hides it.
+
+| attribute | |
+|---|---|
+| `otel_file_exporter.trigger` | why the file rolled: `interval`, `max_spans`, `force_flush`, `shutdown` |
+| `otel_file_exporter.format` | `ndjson` / `parquet` |
+| `otel_file_exporter.store` | `file` for a directory, otherwise the `url:` scheme (`s3`, `gs`, `az`, …) |
+| `otel_file_exporter.file.key` | the file's key under the path/URL prefix |
+| `otel_file_exporter.file.size_bytes` | encoded (compressed) size — what went over the wire |
+| `otel_file_exporter.spans` | records in the file |
+| `otel_file_exporter.encode_ns` | time spent encoding; `duration_ns - encode_ns` ≈ the store write |
+| `error.type` | on failure: the exception class; the span's status is `ERROR` with the message, and that batch was dropped |
+
+Nothing user-supplied can reach these attributes — enums, counts and
+generated keys only.
+
+**Counting S3 requests.** obstore is Rust and exposes no per-call request or
+retry count, so instead of measuring the count the plugin guarantees it:
+every file is exactly one `PutObject` (`use_multipart=False`; files are
+capped by `max_buffer_spans` at single-digit megabytes, far under the 5 GB
+single-PUT limit). Successful flush spans *are* your PUT count, and
+`sum(file.size_bytes)` is the bytes billed — plus at most one retry per
+failed attempt, which the plugin cannot see.
+
+**Failures.** A failed write drops its batch, and the flush span describing
+the failure is buffered — it appears in the first file written after the
+store recovers. Each failure's batch also carries the previous failure's
+record, so a long outage leaves one `ERROR` span (the last attempt), not one
+per attempt.
+
+**The feedback loop.** A span about a write is itself written, whose write
+emits a span… Left alone, an idle server would roll a one-record file every
+`flush_interval_seconds` forever. The exporter's rule: a buffer holding only
+its own spans never rolls — they do not start the interval clock and
+`force_flush` ignores them; they ride along with the next real spans (and
+`shutdown` writes them, so the last real file's record survives). The end-to-end
+test `test_idle_server_stops_writing` holds a server at a 0.5s flush interval
+and checks that the file count stays put.
+
+**Metrics too, if you have a pipeline for them.** The same numbers go out
+through the OpenTelemetry *API* meter as `otel_file_exporter.file.size`
+(histogram, bytes) and `otel_file_exporter.files` (counter, `error.type` set
+on failures), scope `datasette_otel_file_exporter`. Without a
+`MeterProvider` these are free no-ops; with one (say `opentelemetry-instrument`
+exporting OTLP metrics) they show up alongside Datasette core's own metrics.
+This plugin does not write metrics to files.
+
+**With another provider.** Attached to datasette-otel-otlp or an agent, the
+flush span goes to their backend too, under their sampler — with a
+ratio-based sampler some flush spans are simply not recorded, and the PUT
+count above becomes a sample.
+
+Bytes and files shipped per hour, and how long each PUT took:
+
+```sql
+SELECT time_bucket(INTERVAL 1 hour, to_timestamp(start_time_unix_nano / 1e9)) AS hour,
+       count(*) AS files,
+       sum((attributes ->> 'otel_file_exporter.file.size_bytes')::BIGINT) AS bytes,
+       sum((attributes ->> 'otel_file_exporter.spans')::BIGINT) AS spans,
+       round(quantile_cont(duration_ns - (attributes ->> 'otel_file_exporter.encode_ns')::BIGINT, 0.95) / 1e6, 1) AS put_p95_ms
+FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
+WHERE name = 'otel_file_exporter.flush' AND status_code = 'OK'
+GROUP BY hour ORDER BY hour;
+```
+
+Dropped batches:
+
+```sql
+SELECT start_time, attributes ->> 'error.type' AS error, status_message,
+       (attributes ->> 'otel_file_exporter.spans')::BIGINT AS spans_lost
+FROM read_ndjson('telemetry/traces/**/*.ndjson.gz')
+WHERE name = 'otel_file_exporter.flush' AND status_code = 'ERROR'
+ORDER BY start_time_unix_nano;
+```
+
+Also available as `just flushes`.
+
 ## Coexistence with other OpenTelemetry setups
 
 This plugin installs a `TracerProvider` only when nobody else has. If a real
@@ -317,5 +401,6 @@ just demo    # local-directory demo on :8002, 2s flush, ndjson
 just jq      # the newest file through jq
 just query   # canned DuckDB queries against the demo output
 FORMAT=parquet just demo   # the same demo writing Parquet (and FORMAT=parquet just query)
+just demo-viewer   # demo + the sibling ../datasette-otel-viewer: browse the same spans at /-/otel
 just s3-gateway && just demo-s3 && just query-s3   # the same demo against a live S3 API (versitygw)
 ```
