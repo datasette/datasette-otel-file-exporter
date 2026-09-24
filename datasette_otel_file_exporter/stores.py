@@ -83,11 +83,15 @@ class UrlStore:
         self.inner.put(key, data, use_multipart=False)
 
 
-def open_url_store(url):
+def open_url_store(url, config=None):
     """obstore's from_url, with the plugin's retry policy and one env shim.
 
-    Credentials are never plugin config (datasette.yaml gets committed to
-    repos): obstore's native chain reads the standard env vars
+    ``config`` is obstore's per-store configuration (``access_key_id``,
+    ``secret_access_key``, ``endpoint``, ``region``, ...), from the plugin's
+    ``url_config``; each key it sets beats the matching env var. Secrets
+    reach it through datasette's ``{"$env": ...}`` / ``{"$file": ...}``
+    resolution, so datasette.yaml never has to hold one. Everything it
+    leaves out comes from obstore's native chain: the standard env vars
     (AWS_ACCESS_KEY_ID, AWS_SECRET_ACCESS_KEY, AWS_ENDPOINT_URL, ...),
     instance metadata, etc., with automatic refresh.
     """
@@ -110,14 +114,18 @@ def open_url_store(url):
             "base": 2,
         },
     }
-    store_kwargs = {}
+    store_config = {}
     # Fly.io's Tigris injects AWS_ENDPOINT_URL_S3, which obstore does not
-    # read; a per-key config kwarg fills the gap without touching
-    # client_options. AWS_ENDPOINT_URL, when set, wins by omission.
+    # read; a per-key config entry fills the gap without touching
+    # client_options. AWS_ENDPOINT_URL, when set, wins by omission; an
+    # explicit url_config endpoint wins by overwriting.
     if (
         url.startswith("s3://")
         and "AWS_ENDPOINT_URL" not in os.environ
         and os.environ.get("AWS_ENDPOINT_URL_S3")
     ):
-        store_kwargs["endpoint"] = os.environ["AWS_ENDPOINT_URL_S3"]
-    return UrlStore(url, from_url(url, retry_config=retry_config, **store_kwargs))
+        store_config["endpoint"] = os.environ["AWS_ENDPOINT_URL_S3"]
+    store_config.update(config or {})
+    return UrlStore(
+        url, from_url(url, retry_config=retry_config, config=store_config or None)
+    )

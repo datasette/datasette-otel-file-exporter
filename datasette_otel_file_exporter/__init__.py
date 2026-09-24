@@ -14,7 +14,7 @@ datasette-otel-otlp, copied, not imported):
    ``datasette.startup`` span starts before any plugin hook runs.
 
 2. In the ``startup()`` hook, the first place plugin config is readable,
-   resolve ``path``/``url``/``format``/``flush_interval_seconds``/
+   resolve ``path``/``url``/``url_config``/``format``/``flush_interval_seconds``/
    ``max_buffer_spans``/``service_name`` and point the lazy exporter at a
    real ``FileSpanExporter`` - or, with no destination configured, drop
    everything and sample nothing from then on (dormant).
@@ -239,11 +239,35 @@ def _set_schedule_delay(processor, millis):
             pass
 
 
-def _build_store(path=None, url=None):
+def _build_store(path=None, url=None, url_config=None):
     "LocalDirectoryStore for path:, obstore for url: - the exporter sees one put()."
     if url is not None:
-        return open_url_store(url)
+        return open_url_store(url, config=url_config)
     return LocalDirectoryStore(path)
+
+
+def _resolve_url_config(url_config):
+    """Validate url_config and drop the keys that resolved to nothing.
+
+    Datasette has already replaced ``{"$env": "NAME"}`` with the variable's
+    value - or None when it is unset. Dropping those keys lets obstore's own
+    env chain fill them, which keeps one datasette.yaml working both locally
+    (explicit keys) and on a host with instance credentials.
+    """
+    if url_config is None:
+        return None
+    if not isinstance(url_config, dict):
+        raise ValueError(
+            f"{PLUGIN_NAME}: 'url_config' must be a mapping of obstore "
+            f"config keys to values, got {type(url_config).__name__}"
+        )
+    resolved = {}
+    for key, value in url_config.items():
+        if value is None:
+            _log(f"url_config.{key} is unset (an unset $env?) - ignoring it")
+            continue
+        resolved[str(key)] = str(value)
+    return resolved
 
 
 def _configure(config):
@@ -281,6 +305,10 @@ def _configure(config):
         _state["mode"] = "dormant"
         return
 
+    if config.get("url_config") is not None and not url:
+        raise ValueError(f"{PLUGIN_NAME}: 'url_config' needs 'url'")
+    url_config = _resolve_url_config(config.get("url_config"))
+
     # Misconfiguration (unknown format, an extra that is not installed)
     # fails startup with an actionable message, before any store is opened:
     # silently dropping every batch would be the worse outcome.
@@ -302,6 +330,7 @@ def _configure(config):
         store = _build_store(
             path=str(path) if path else None,
             url=str(url) if url else None,
+            url_config=url_config,
         )
     except Exception as exception:
         _log(

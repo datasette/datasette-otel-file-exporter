@@ -33,7 +33,13 @@ directory has no business dragging in.
 ## Quickstart
 
 ```bash
-datasette mydb.db -s plugins.datasette-otel-file-exporter.path ./telemetry
+
+uvx --prerelease=allow \
+  --with datasette-otel-file-exporter \
+  --with 'datasette>=1a41' \
+  datasette \
+    -s plugins.datasette-otel-file-exporter.path ./telemetry \
+    my_data.db
 ```
 
 Browse a few pages, then (from another terminal — files are immutable once
@@ -90,6 +96,7 @@ plugins:
   datasette-otel-file-exporter:
     path: ./telemetry              # local directory (created if absent)
     # url: s3://my-bucket/telemetry  # ...or any obstore URL: s3:// gs:// az://
+    # url_config: {...}              # obstore store config for url: (see below)
     format: ndjson                 # or parquet (needs the [parquet] extra)
     flush_interval_seconds: 10     # roll a new file at most this often
     max_buffer_spans: 10000        # ...or when this many spans are buffered
@@ -111,10 +118,9 @@ plugins:
 
 ### Object storage credentials
 
-`url:` needs the `[obstore]` extra. Credentials are **never** plugin config —
-`datasette.yaml` gets committed to repos. `url:` stores authenticate through
-obstore's native chain: standard environment variables, instance metadata /
-IAM roles, with automatic refresh.
+`url:` needs the `[obstore]` extra. With no `url_config`, `url:` stores
+authenticate through obstore's native chain: standard environment variables,
+instance metadata / IAM roles, with automatic refresh.
 
 AWS S3:
 
@@ -136,6 +142,44 @@ export AWS_ALLOW_HTTP=true                               # only for http:// endp
 On Fly.io with Tigris (`fly storage create`), no extra step is needed: Fly
 injects `AWS_ENDPOINT_URL_S3` (plus keys) into the app, and the plugin falls
 back to it for `s3://` URLs when `AWS_ENDPOINT_URL` is unset.
+
+#### Credentials in config: `url_config`
+
+To keep everything in `datasette.yaml` (or to use variable names of your
+own choosing), set `url_config`. It is passed to obstore as the store's
+[config](https://developmentseed.org/obstore/latest/api/store/aws/): each
+key it sets beats the matching environment variable, and every key it leaves
+out still comes from the native chain. Never write a secret in literally —
+use Datasette's `$env` (or `$file`) indirection, which is resolved before
+the plugin sees the value:
+
+```yaml
+plugins:
+  datasette-otel-file-exporter:
+    url: s3://my-bucket/telemetry
+    url_config:
+      access_key_id:
+        $env: TELEMETRY_S3_KEY_ID
+      secret_access_key:
+        $env: TELEMETRY_S3_SECRET
+      endpoint: https://<account>.r2.cloudflarestorage.com
+      region: auto
+```
+
+```bash
+TELEMETRY_S3_KEY_ID=... TELEMETRY_S3_SECRET=... datasette mydb.db -c datasette.yaml
+```
+
+- Keys are obstore's, per store: `access_key_id`, `secret_access_key`,
+  `session_token`, `endpoint`, `region`, … for S3; `service_account_key`, …
+  for GCS; `account_key`, `sas_key`, … for Azure. An unknown key disables
+  export with one stderr line naming it.
+- A `$env` whose variable is unset is dropped (one stderr line), so the
+  native chain fills that key — the same file works locally with explicit
+  keys and on a host with an IAM role.
+- `url_config` without `url` is a startup error.
+- `allow_http` is an HTTP client option, not store config: plain-`http://`
+  endpoints still need `AWS_ALLOW_HTTP=true` in the environment.
 
 Operational notes for buckets: each flush is one network PUT from a
 background thread (never the event loop). `flush_interval_seconds: 1`

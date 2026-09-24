@@ -371,3 +371,50 @@ class TestBuildStoreEndpointFallback:
 
         store = _build_store(url="s3://bkt/pfx")
         assert store.inner.config.get("endpoint") is None
+
+
+class TestUrlConfig:
+    "url_config is obstore's per-store config; datasette resolves $env first."
+
+    @pytest.fixture(autouse=True)
+    def _clean_env(self, monkeypatch):
+        for var in ("AWS_ENDPOINT_URL", "AWS_ENDPOINT_URL_S3"):
+            monkeypatch.delenv(var, raising=False)
+
+    def test_passed_to_obstore(self):
+        from datasette_otel_file_exporter import _build_store
+
+        store = _build_store(
+            url="s3://bkt/pfx",
+            url_config={
+                "access_key_id": "cfg-key",
+                "secret_access_key": "cfg-secret",
+                "endpoint": "http://127.0.0.1:7070",
+            },
+        )
+        assert store.inner.config["access_key_id"] == "cfg-key"
+        assert store.inner.config["secret_access_key"] == "cfg-secret"
+        assert store.inner.config["endpoint"] == "http://127.0.0.1:7070"
+        assert store.inner.client_options is None
+
+    def test_beats_tigris_fallback(self, monkeypatch):
+        from datasette_otel_file_exporter import _build_store
+
+        monkeypatch.setenv("AWS_ENDPOINT_URL_S3", "http://tigris.test:9000")
+        store = _build_store(
+            url="s3://bkt/pfx", url_config={"endpoint": "http://mine.test"}
+        )
+        assert store.inner.config["endpoint"] == "http://mine.test"
+
+    def test_unset_env_keys_dropped(self, capsys):
+        from datasette_otel_file_exporter import _resolve_url_config
+
+        resolved = _resolve_url_config({"access_key_id": None, "region": "auto"})
+        assert resolved == {"region": "auto"}
+        assert "url_config.access_key_id is unset" in capsys.readouterr().err
+
+    def test_must_be_mapping(self):
+        from datasette_otel_file_exporter import _resolve_url_config
+
+        with pytest.raises(ValueError, match="mapping"):
+            _resolve_url_config("access_key_id=x")

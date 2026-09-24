@@ -460,3 +460,39 @@ def test_idle_server_stops_writing(tmp_path, demo_db):
             process.wait(timeout=20)
         finally:
             process.kill()
+
+
+@pytest.mark.asyncio
+async def test_url_config_resolves_env_secrets(tmp_path, monkeypatch):
+    "datasette's {'$env': ...} reaches obstore as the variable's value."
+    import datasette_otel_file_exporter as plugin
+
+    captured = {}
+    real_build_store = plugin._build_store
+
+    def spy(**kwargs):
+        captured.update(kwargs)
+        return real_build_store(path=str(tmp_path / "tel"))
+
+    monkeypatch.setattr(plugin, "_build_store", spy)
+    monkeypatch.setenv("TEST_TEL_KEY", "from-env")
+    monkeypatch.delenv("TEST_TEL_UNSET", raising=False)
+    datasette = make_datasette(
+        url="s3://bkt/pfx",
+        url_config={
+            "access_key_id": {"$env": "TEST_TEL_KEY"},
+            "secret_access_key": {"$env": "TEST_TEL_UNSET"},
+            "region": "auto",
+        },
+    )
+    assert (await datasette.client.get("/")).status_code == 200
+    assert captured["url_config"] == {"access_key_id": "from-env", "region": "auto"}
+
+
+@pytest.mark.asyncio
+async def test_url_config_without_url(tmp_path):
+    datasette = make_datasette(
+        path=str(tmp_path / "tel"), url_config={"region": "auto"}
+    )
+    with pytest.raises(ValueError, match="'url_config' needs 'url'"):
+        await datasette.client.get("/")
