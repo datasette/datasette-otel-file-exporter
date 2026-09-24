@@ -1,0 +1,29 @@
+name: Test
+
+on: [push, pull_request]
+
+permissions:
+  contents: read
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+    strategy:
+      matrix:
+        python-version: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+    - uses: actions/checkout@v5
+    - uses: astral-sh/setup-uv@v7
+      with:
+        python-version: ${{ matrix.python-version }}
+    - run: uv run pytest
+  coexistence:
+    # Same suite with datasette-otel-otlp-exporter installed, so
+    # tests/test_coexistence.py runs instead of skipping (just test-coexistence)
+    runs-on: ubuntu-latest
+    steps:
+    - uses: actions/checkout@v5
+    - uses: astral-sh/setup-uv@v7
+      with:
+        python-version: "3.13"
+    - run: uv run --with "datasette-otel-otlp-exporter @ git+https://github.com/datasette/datasette-otel-otlp-exporter" pytest
