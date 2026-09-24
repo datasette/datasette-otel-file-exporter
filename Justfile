@@ -7,10 +7,6 @@
 #
 # FORMAT=parquet just demo / FORMAT=parquet just query for the Parquet flavour;
 # every query below is the same SQL, only the reader function changes.
-#
-# Everything runs against datasette's phase-1 otel branch, resolved through the
-# [tool.uv.sources] override in pyproject.toml - no released datasette emits
-# these spans yet. See NOTES.md.
 
 telemetry := "./telemetry"
 format := env("FORMAT", "ndjson")

@@ -10,9 +10,8 @@ semantics with a new provider per test, reset_otel keeps that single provider
 and rewinds the plugin's mutable pieces (lazy exporter, deferred sampler,
 resource attributes, state machine) between tests.
 
-Requires datasette's phase-1 otel branch (asg017/otel-phase1-* or later),
-which pyproject.toml's [tool.uv.sources] override resolves - no released
-datasette emits these spans. Run via `just test` or `uv run pytest`.
+Requires datasette 1.0a41 or later (the first release with OpenTelemetry
+support). Run via `just test` or `uv run pytest`.
 Coexistence tests additionally need datasette-otel-otlp importable (wired by
 `just test-coexistence`); they skip when it is absent.
 """
