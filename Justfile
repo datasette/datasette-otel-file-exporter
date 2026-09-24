@@ -37,6 +37,17 @@ test *options:
 test-coexistence *options:
     uv run --with "{{ otlp_source }}" pytest {{ options }}
 
+# Lint, format check and type check - what CI runs
+check:
+    uv run ruff check .
+    uv run ruff format --check .
+    uv run ty check
+
+# Apply ruff's autofixes and formatting
+fix:
+    uv run ruff check --fix .
+    uv run ruff format .
+
 # Generate demo.db (200-row table) if missing
 demo-db:
     @[ -e demo.db ] || sqlite3 demo.db "create table plants(id integer primary key, name text, height_cm real); with recursive n(i) as (select 1 union all select i + 1 from n where i < 200) insert into plants select i, 'plant ' || i, abs(random() % 300) from n;"

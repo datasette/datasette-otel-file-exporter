@@ -15,10 +15,10 @@ import urllib.request
 
 import duckdb
 import pytest
+from conftest import flush
 from datasette.app import Datasette
 
 import datasette_otel_file_exporter
-from conftest import flush
 from datasette_otel_file_exporter.exporter import (
     FLUSH_SPAN,
     SCHEMA_METADATA_KEY,
@@ -293,9 +293,7 @@ async def test_url_via_obstore_from_url(tmp_path):
 
 @pytest.mark.asyncio
 async def test_path_and_url_mutually_exclusive(tmp_path):
-    datasette = make_datasette(
-        path=str(tmp_path / "a"), url=f"file://{tmp_path}/b"
-    )
+    datasette = make_datasette(path=str(tmp_path / "a"), url=f"file://{tmp_path}/b")
     with pytest.raises(ValueError, match="mutually exclusive"):
         await datasette.client.get("/")
 
@@ -393,9 +391,7 @@ async def test_exporter_records_its_own_writes(tmp_path, demo_db, format):
         f"FROM $T WHERE scope_name = '{SCOPE_NAME}'",
         format,
     )
-    (
-        (name, status, scope, key, size, spans, trigger, store, fmt),
-    ) = own
+    ((name, status, _scope, key, size, spans, trigger, store, fmt),) = own
     assert name == FLUSH_SPAN and status == "OK"
     assert str(tel / key) == first
     assert size == os.path.getsize(first)

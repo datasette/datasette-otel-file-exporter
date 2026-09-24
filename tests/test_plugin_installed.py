@@ -1,5 +1,5 @@
-from datasette.app import Datasette
 import pytest
+from datasette.app import Datasette
 
 
 @pytest.mark.asyncio

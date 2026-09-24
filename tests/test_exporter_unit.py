@@ -12,6 +12,7 @@ import time
 
 import duckdb
 import pytest
+from conftest import make_test_spans
 from opentelemetry.sdk.trace import TracerProvider
 from opentelemetry.sdk.trace.export import (
     SimpleSpanProcessor,
@@ -22,7 +23,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 from opentelemetry.trace import Status, StatusCode
 
-from conftest import make_test_spans
 from datasette_otel_file_exporter.exporter import (
     FileSpanExporter,
     FormatUnavailable,
@@ -79,9 +79,7 @@ def make_exporter(store=None, **kwargs):
     clock = FakeClock()
     kwargs.setdefault("flush_interval_seconds", 10)
     kwargs.setdefault("max_buffer_spans", 10000)
-    exporter = FileSpanExporter(
-        store, clock=clock, background_flush=False, **kwargs
-    )
+    exporter = FileSpanExporter(store, clock=clock, background_flush=False, **kwargs)
     return exporter, store, clock
 
 
@@ -110,7 +108,7 @@ def test_interval_roll(format):
 
 
 def test_max_spans_roll():
-    exporter, store, clock = make_exporter(max_buffer_spans=5)
+    exporter, store, _clock = make_exporter(max_buffer_spans=5)
     exporter.export(make_test_spans(4))
     assert keys(store) == []
     exporter.export(make_test_spans(1))
@@ -118,7 +116,7 @@ def test_max_spans_roll():
 
 
 def test_force_flush_writes_remainder():
-    exporter, store, clock = make_exporter()
+    exporter, store, _clock = make_exporter()
     exporter.export(make_test_spans(2))
     assert exporter.force_flush() is True
     assert len(keys(store)) == 1
@@ -128,7 +126,7 @@ def test_force_flush_writes_remainder():
 
 
 def test_shutdown_writes_remainder():
-    exporter, store, clock = make_exporter()
+    exporter, store, _clock = make_exporter()
     exporter.export(make_test_spans(2))
     exporter.shutdown()
     assert len(keys(store)) == 1
@@ -163,7 +161,7 @@ def test_key_layout_hour_partitions(format):
 
 
 def test_write_failure_drops_batch_logs_once(capsys):
-    exporter, _, clock = make_exporter(store=object(), max_buffer_spans=1)
+    exporter, _, _clock = make_exporter(store=object(), max_buffer_spans=1)
     assert exporter.export(make_test_spans(1)) is SpanExportResult.FAILURE
     assert exporter.export(make_test_spans(1)) is SpanExportResult.FAILURE
     err = capsys.readouterr().err
@@ -179,7 +177,7 @@ def gnarly_spans():
     provider.add_span_processor(SimpleSpanProcessor(collected))
     tracer = provider.get_tracer("fidelity")
     big = "x" * 100_000
-    with tracer.start_as_current_span("gnarly – span 🦆") as span:
+    with tracer.start_as_current_span("gnarly – span 🦆") as span:  # noqa: RUF001
         span.set_attribute("note", "héllo → wörld 🚀")
         span.set_attribute("big", big)
         span.set_attribute("json_ish", '{"nested": [1, 2, {"k": "v"}]}')
@@ -199,9 +197,7 @@ def test_round_trip_fidelity(tmp_path, format):
     exporter.export(spans)
     exporter.force_flush()
 
-    (
-        (name, note, big_out, nested, counts, status, message, event_detail),
-    ) = read_sql(
+    ((name, note, big_out, nested, counts, status, message, event_detail),) = read_sql(
         tmp_path / "tel",
         format,
         """
@@ -217,7 +213,7 @@ def test_round_trip_fidelity(tmp_path, format):
         FROM $T
         """,
     )
-    assert name == "gnarly – span 🦆"
+    assert name == "gnarly – span 🦆"  # noqa: RUF001
     assert note == "héllo → wörld 🚀"
     assert big_out == big
     assert nested == "v"
@@ -230,7 +226,7 @@ def test_round_trip_fidelity(tmp_path, format):
 def test_ndjson_line_shape():
     "What jq sees: nested objects, ISO start_time, schema_version on every line."
     spans, _ = gnarly_spans()
-    exporter, store, clock = make_exporter()
+    exporter, store, _clock = make_exporter()
     exporter.export(spans)
     exporter.force_flush()
     (key,) = keys(store)

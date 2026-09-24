@@ -85,7 +85,7 @@ def reset_otel():
     # receiver goes away
     _quiesce()
     try:
-        import datasette_otel_otlp
+        import datasette_otel_otlp  # ty: ignore[unresolved-import] - optional
 
         if "exporter" in datasette_otel_otlp._state:
             datasette_otel_otlp._state["exporter"].configure(None)

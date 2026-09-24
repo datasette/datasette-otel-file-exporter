@@ -156,9 +156,7 @@ def _install():
         # If OTEL_TRACES_SAMPLER is set, let the SDK build the sampler from
         # the environment (env beats plugin config); otherwise install a
         # delegating sampler the startup hook can retarget.
-        sampler = (
-            None if "OTEL_TRACES_SAMPLER" in os.environ else _DeferredSampler()
-        )
+        sampler = None if "OTEL_TRACES_SAMPLER" in os.environ else _DeferredSampler()
 
         exporter = _LazySpanExporter()
         if sampler is not None:
@@ -276,11 +274,7 @@ def _configure(config):
         return
 
     owns = _state["owns_provider"]
-    if (
-        owns
-        and config.get("service_name")
-        and "OTEL_SERVICE_NAME" not in os.environ
-    ):
+    if owns and config.get("service_name") and "OTEL_SERVICE_NAME" not in os.environ:
         _set_service_name(_state["resource"], str(config["service_name"]))
 
     path = config.get("path")
@@ -323,9 +317,7 @@ def _configure(config):
     flush_interval = float(
         config.get("flush_interval_seconds", DEFAULT_FLUSH_INTERVAL_SECONDS)
     )
-    max_buffer_spans = int(
-        config.get("max_buffer_spans", DEFAULT_MAX_BUFFER_SPANS)
-    )
+    max_buffer_spans = int(config.get("max_buffer_spans", DEFAULT_MAX_BUFFER_SPANS))
     try:
         store = _build_store(
             path=str(path) if path else None,
@@ -377,9 +369,8 @@ def _configure(config):
         ):
             _log(
                 "configured, but the TracerProvider this plugin attached to "
-                "samples nothing (sampler: %s) - no spans will be recorded. "
+                f"samples nothing (sampler: {description}) - no spans will be recorded. "
                 "Is datasette-otel-otlp installed without an endpoint?"
-                % description
             )
 
 

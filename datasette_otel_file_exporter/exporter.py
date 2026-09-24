@@ -270,9 +270,7 @@ def check_format(name):
     actionable message, rather than dropping every batch with a log line.
     """
     if name not in FORMATS:
-        raise ValueError(
-            f"unknown format {name!r} - expected one of {sorted(FORMATS)}"
-        )
+        raise ValueError(f"unknown format {name!r} - expected one of {sorted(FORMATS)}")
     module = FORMATS[name][2]
     if module is not None:
         try:

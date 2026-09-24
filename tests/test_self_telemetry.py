@@ -12,8 +12,10 @@ feedback loop with no thread or timing in the way.
 import gzip
 import json
 import os
+from typing import Any
 
 import pytest
+from conftest import make_test_spans
 from opentelemetry.sdk.metrics import MeterProvider
 from opentelemetry.sdk.metrics.export import InMemoryMetricReader
 from opentelemetry.sdk.trace import TracerProvider
@@ -22,8 +24,8 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
     InMemorySpanExporter,
 )
 from opentelemetry.trace import SpanKind, StatusCode
+from test_exporter_unit import DictStore, FakeClock, keys
 
-from conftest import make_test_spans
 from datasette_otel_file_exporter import registry
 from datasette_otel_file_exporter.exporter import (
     ATTR_ENCODE_NS,
@@ -41,7 +43,6 @@ from datasette_otel_file_exporter.exporter import (
     FileSpanExporter,
 )
 from datasette_otel_file_exporter.stores import LocalDirectoryStore, UrlStore
-from test_exporter_unit import DictStore, FakeClock, keys
 
 
 class FlakyStore(DictStore):
@@ -101,7 +102,7 @@ def own_rows(data):
 
 
 def test_flush_span_describes_the_file():
-    exporter, store, clock, collected = make_looped_exporter()
+    exporter, store, _clock, collected = make_looped_exporter()
     exporter.export(make_test_spans(3))
     assert exporter.force_flush() is True
     (key,) = keys(store)
@@ -129,7 +130,7 @@ def test_flush_span_describes_the_file():
 
 @pytest.mark.parametrize("format", ["ndjson", "parquet"])
 def test_format_attribute(format):
-    exporter, store, clock, collected = make_looped_exporter(format=format)
+    exporter, _store, _clock, collected = make_looped_exporter(format=format)
     exporter.export(make_test_spans(1))
     exporter.force_flush()
     (span,) = flush_spans(collected)
@@ -137,7 +138,7 @@ def test_format_attribute(format):
 
 
 def test_every_trigger_is_named():
-    exporter, store, clock, collected = make_looped_exporter(max_buffer_spans=3)
+    exporter, _store, clock, collected = make_looped_exporter(max_buffer_spans=3)
     exporter.export(make_test_spans(1))
     clock.now += 10
     exporter.export(make_test_spans(1))  # interval
@@ -156,7 +157,7 @@ def test_every_trigger_is_named():
 
 def test_own_spans_never_roll_a_file_of_their_own():
     "The feedback loop: idle after one real file, nothing more is written."
-    exporter, store, clock, collected = make_looped_exporter()
+    exporter, store, clock, _collected = make_looped_exporter()
     exporter.export(make_test_spans(2))
     clock.now += 10
     exporter.export(make_test_spans(1))
@@ -191,7 +192,7 @@ def test_own_spans_never_roll_a_file_of_their_own():
 
 
 def test_force_flush_skips_self_only_buffer_but_shutdown_writes_it():
-    exporter, store, clock, collected = make_looped_exporter()
+    exporter, store, _clock, _collected = make_looped_exporter()
     exporter.export(make_test_spans(1))
     exporter.force_flush()
     (first,) = keys(store)
@@ -212,7 +213,7 @@ def test_outage_leaves_exactly_one_own_span_buffered(capsys):
     ever rolls, so a downed store costs one put attempt per real batch."""
     store = FlakyStore()
     store.down = True
-    exporter, _, clock, collected = make_looped_exporter(store, max_buffer_spans=3)
+    exporter, _, _clock, collected = make_looped_exporter(store, max_buffer_spans=3)
     for _ in range(10):
         assert exporter.export(make_test_spans(3)) is SpanExportResult.FAILURE
         assert len(exporter._records) == 1
@@ -232,7 +233,7 @@ def test_outage_leaves_exactly_one_own_span_buffered(capsys):
 
 def test_outage_evidence_lands_after_recovery():
     store = FlakyStore()
-    exporter, _, clock, collected = make_looped_exporter(store)
+    exporter, _, _clock, collected = make_looped_exporter(store)
     store.down = True
     exporter.export(make_test_spans(2))
     assert exporter.force_flush() is False
@@ -256,7 +257,7 @@ def test_outage_evidence_lands_after_recovery():
 
 
 def test_local_store_scheme(tmp_path):
-    exporter, _, clock, collected = make_looped_exporter(
+    exporter, _, _clock, collected = make_looped_exporter(
         LocalDirectoryStore(tmp_path / "tel")
     )
     exporter.export(make_test_spans(1))
@@ -269,7 +270,8 @@ def test_local_store_scheme(tmp_path):
 
 def test_url_store_is_one_request_per_file():
     class FakeObstore:
-        calls = []
+        def __init__(self):
+            self.calls = []
 
         def put(self, path, data, **kwargs):
             self.calls.append((path, data, kwargs))
@@ -288,7 +290,7 @@ def test_metrics_through_the_api_meter():
     reader = InMemoryMetricReader()
     meter = MeterProvider(metric_readers=[reader]).get_meter(SCOPE_NAME)
     store = FlakyStore()
-    exporter, _, clock, collected = make_looped_exporter(store, meter=meter)
+    exporter, _, _clock, _collected = make_looped_exporter(store, meter=meter)
     exporter.export(make_test_spans(1))
     exporter.force_flush()
     (key,) = keys(store)
@@ -296,13 +298,18 @@ def test_metrics_through_the_api_meter():
     exporter.export(make_test_spans(1))
     exporter.force_flush()
 
-    points = {}
-    for resource in reader.get_metrics_data().resource_metrics:
+    # Any: a data point's type (sum vs histogram) depends on the metric
+    points: dict[tuple, Any] = {}
+    metrics_data = reader.get_metrics_data()
+    assert metrics_data is not None
+    for resource in metrics_data.resource_metrics:
         for scope in resource.scope_metrics:
             assert scope.scope.name == SCOPE_NAME
             for metric in scope.metrics:
                 for point in metric.data.data_points:
-                    points[(metric.name, dict(point.attributes).get(ATTR_ERROR_TYPE))] = point
+                    points[
+                        (metric.name, dict(point.attributes or {}).get(ATTR_ERROR_TYPE))
+                    ] = point
     size = points[(METRIC_FILE_SIZE, None)]
     assert size.count == 1 and size.sum == len(store.files[key])
     assert size.attributes == {ATTR_FORMAT: "ndjson", ATTR_STORE: "unknown"}

@@ -15,6 +15,10 @@ Same hard rule as the exporter: nothing here imports from ``datasette``.
 
 import os
 import secrets
+from typing import TYPE_CHECKING, Any
+
+if TYPE_CHECKING:
+    from obstore.store import RetryConfig
 
 
 class LocalDirectoryStore:
@@ -105,7 +109,7 @@ def open_url_store(url, config=None):
     # bucket, never block process exit long on one. Client options
     # (timeouts, allow_http) stay env-driven - passing client_options
     # here would override the environment wholesale.
-    retry_config = {
+    retry_config: RetryConfig = {
         "max_retries": 1,
         "retry_timeout": timedelta(seconds=30),
         "backoff": {
@@ -114,7 +118,9 @@ def open_url_store(url, config=None):
             "base": 2,
         },
     }
-    store_config = {}
+    # Any: which store's config TypedDict applies depends on the URL scheme,
+    # and url_config is user-supplied - obstore validates the keys itself
+    store_config: Any = {}
     # Fly.io's Tigris injects AWS_ENDPOINT_URL_S3, which obstore does not
     # read; a per-key config entry fills the gap without touching
     # client_options. AWS_ENDPOINT_URL, when set, wins by omission; an

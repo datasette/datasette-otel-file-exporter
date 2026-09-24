@@ -24,6 +24,7 @@ from http.server import BaseHTTPRequestHandler, HTTPServer
 
 import duckdb
 import pytest
+from conftest import reset_tracer_state
 from datasette.app import Datasette
 from opentelemetry import trace
 from opentelemetry.sdk.trace import TracerProvider
@@ -33,7 +34,6 @@ from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
 )
 
 import datasette_otel_file_exporter
-from conftest import reset_tracer_state
 
 otlp_plugin = pytest.importorskip("datasette_otel_otlp_exporter")
 
@@ -43,8 +43,12 @@ def otlp_receiver():
     "Counts OTLP POSTs; parsing the protobuf is the otlp plugin's own business."
     posts = []
 
+    class Receiver(HTTPServer):
+        posts: list
+        endpoint: str
+
     class Handler(BaseHTTPRequestHandler):
-        def log_message(self, *args):
+        def log_message(self, format, *args):
             pass
 
         def do_POST(self):
@@ -54,7 +58,7 @@ def otlp_receiver():
             self.send_header("Content-Length", "0")
             self.end_headers()
 
-    server = HTTPServer(("127.0.0.1", 0), Handler)
+    server = Receiver(("127.0.0.1", 0), Handler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
     server.posts = posts
     server.endpoint = f"http://127.0.0.1:{server.server_address[1]}"
@@ -129,7 +133,10 @@ async def test_files_first_both_export(tmp_path, otlp_receiver):
     otlp_plugin._install()
     assert otlp_plugin._state["mode"] == "pending"
     assert otlp_plugin._state["owns_provider"] is False
-    assert otlp_plugin._state["provider"] is datasette_otel_file_exporter._state["provider"]
+    assert (
+        otlp_plugin._state["provider"]
+        is datasette_otel_file_exporter._state["provider"]
+    )
 
     tel = tmp_path / "tel"
     await run_startup(tel, endpoint=otlp_receiver.endpoint)
