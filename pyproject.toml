@@ -1,6 +1,6 @@
 [project]
 name = "datasette-otel-file-exporter"
-version = "0.1.0a0"
+version = "0.1.0a1"
 description = "Export Datasette's OpenTelemetry spans to files - gzipped NDJSON or Parquet, a local directory or object storage. No collector, no backend"
 readme = "README.md"
 authors = [{name = "Alex Garcia"}]
